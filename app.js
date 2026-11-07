@@ -624,7 +624,9 @@ function tripView(id) {
         <label class="field">Transport<input id="tfTransport" value="${esc(tr.transport)}"></label>
         <label class="field">Responsable et téléphone<input id="tfContact" value="${esc(tr.contact)}"></label>
         <div class="row"><button class="btn small">Enregistrer</button><button type="button" class="btn small ghost" data-canceledit>Annuler</button></div></form>`
-      : `<button class="btn small ghost" data-edittrip="${id}" style="align-self:flex-start">Modifier le départ, le transport…</button>`) : ""}
+      : `<div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn small ghost" data-edittrip="${id}">Modifier le départ, l'hébergement…</button>
+          <button class="btn small ghost" data-editev="${e.id}">Modifier la compétition</button>
+          ${S.confirm === e.id ? `<button class="btn small danger" data-delev="${e.id}">Confirmer la suppression</button><button class="btn small ghost" data-cancel>Annuler</button>` : `<button class="btn small ghost" data-askdel="${e.id}">Supprimer la compétition</button>`}</div>`) : ""}
     ${presence}
     ${legs.length || canPlan() ? `<div class="card stack"><h2>Trajets</h2>
       ${legs.map(l => `<div class="doc"><span class="fi" style="width:40px;height:40px;border-radius:10px;background:var(--accent-soft);display:grid;place-items:center;font-size:20px;flex:none">${MODES[l.mode] || "🚌"}</span>
@@ -854,7 +856,8 @@ function bind() {
   on("[data-editev]", b => go("planning", { kind: "editEvent", id: b.dataset.editev }));
   on("[data-askdel]", b => { S.confirm = b.dataset.askdel; render(0); });
   on("[data-cancel]", () => { S.confirm = null; render(0); });
-  on("[data-delev]", async b => { try { await q(sb.from("events").delete().eq("id", b.dataset.delev).select()); D.events = D.events.filter(e => e.id !== b.dataset.delev); S.confirm = null; render(0); toast("Supprimé du planning"); } catch (e) { fail(e); } });
+  on("[data-delev]", async b => { try { await q(sb.from("events").delete().eq("id", b.dataset.delev).select()); D.events = D.events.filter(e => e.id !== b.dataset.delev); S.confirm = null;
+    if (S.view && S.view.kind === "trip") go("trips"); else render(0); toast("Supprimé du planning"); } catch (e) { fail(e); } });
   on("[data-open]", async b => { try { const u = await signedUrl(b.dataset.open); window.open(u, "_blank", "noopener"); } catch (e) { fail(e, "Impossible d'ouvrir ce fichier."); } });
   on("[data-packfor]", b => { S.packFor = b.dataset.packfor; render(0); });
   on("[data-docfor]", b => { S.docFor = b.dataset.docfor; render(); window.scrollTo(0, 0); });
