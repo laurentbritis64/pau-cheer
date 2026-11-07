@@ -70,23 +70,30 @@ const urlCache = {};
 const P = id => (D && D.P[id]) || { id, full_name: "Ancien membre", role: "pending" };
 const T = id => D.teams.find(t => t.id === id) || { id, name: id, color: "#888" };
 const isBureau = () => me && me.role === "bureau";
+// Peut créer, modifier et supprimer les événements et les déplacements
+const canPlan = () => isBureau() || !!(me && me.can_plan && me.role !== "pending");
+const planTeams = () => canPlan() ? D.teams.map(t => t.id) : myTeams();
 
 function childrenOf(pid) { return D.links.filter(l => l.parent_id === pid).map(l => P(l.athlete_id)).filter(a => a.role === "athlete"); }
 function parentsOf(aid) { return D.links.filter(l => l.athlete_id === aid).map(l => P(l.parent_id)); }
 function myTeams() {
   if (isBureau()) return D.teams.map(t => t.id);
   if (me.role === "athlete") return me.team_id ? [me.team_id] : [];
+  if (me.role === "coach") return coachTeamsOf(me.id);
   return [...new Set(childrenOf(me.id).map(c => c.team_id).filter(Boolean))].sort((a, b) => T(a).position - T(b).position);
 }
+function coachTeamsOf(id) { return (D.coachTeams || []).filter(c => c.coach_id === id).map(c => c.team_id).sort((a, b) => T(a).position - T(b).position); }
 function myAthletes() { return me.role === "athlete" ? [me] : me.role === "parent" ? childrenOf(me.id) : []; }
 function childrenIn(team) { return me.role === "parent" ? childrenOf(me.id).filter(c => c.team_id === team) : []; }
 function athletes() { return Object.values(D.P).filter(p => p.role === "athlete").sort((a, b) => a.full_name.localeCompare(b.full_name)); }
 function roleLabel(u) {
   if (u.role === "bureau") return (u.title ? u.title + " · " : "") + "Bureau";
   if (u.role === "athlete") return "Athlète" + (u.team_id ? " · " + T(u.team_id).name : "");
+  if (u.role === "coach") { const t = coachTeamsOf(u.id); return "Coach" + (t.length ? " · " + t.map(x => T(x).name).join(", ") : ""); }
   if (u.role === "parent") { const c = childrenOf(u.id); return c.length ? "Parent de " + c.map(x => first(x.full_name)).join(", ") : "Parent"; }
   return "En attente de validation";
 }
+function roleLabelFull(u) { return roleLabel(u) + (u.can_plan && u.role !== "bureau" && u.role !== "pending" ? " · gère le planning" : ""); }
 const teamChip = id => { const t = T(id); return `<span class="chip" style="padding:3px 9px;font-size:12px"><span class="dot" style="background:${t.color}"></span>${esc(t.name)}</span>`; };
 
 /* Conversations */
@@ -149,9 +156,9 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
-    q(sb.from("profiles").select("id,full_name,role,team_id,title")),
+    q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
     q(sb.from("events").select("*").gte("date", since).order("date").order("start_time").limit(3000)),
     q(sb.from("event_teams").select("*").limit(10000)),
@@ -163,11 +170,13 @@ async function loadAll() {
     q(sb.from("trip_packed").select("*")),
     q(sb.from("documents").select("*").order("created_at")),
     q(sb.from("messages").select("*").order("created_at", { ascending: false }).limit(600)),
+    q(sb.from("coach_teams").select("*")).catch(() => []),
+    q(sb.from("attendance").select("*").gte("updated_at", addDays(todayIso(), -120))).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs };
+  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance };
 }
 async function reload() { try { await loadAll(); render(); } catch (e) { fail(e); } }
 
@@ -209,7 +218,12 @@ function render(keepBottom) {
   const v = S.view;
   try {
     if (S.tab === "account") { title = "Mon compte"; body = accountView(); back = () => go("planning"); }
-    if (S.tab === "planning") { title = "Planning"; body = planningView(); }
+    if (S.tab === "planning") {
+      if (v && v.kind === "addEvent" && canPlan()) { title = "Ajouter au planning"; body = addEventView(); back = () => go("planning"); }
+      else if (v && v.kind === "roll") { title = "Appel"; body = rollView(v.id); back = () => go("planning"); }
+      else if (v && v.kind === "editEvent" && canPlan()) { title = "Modifier"; body = editEventView(v.id); back = () => go("planning"); }
+      else { title = "Planning"; body = planningView(); }
+    }
     if (S.tab === "chats") {
       if (v && v.kind === "conv") { const r = convView(v.key); title = r.title; body = r.body; composer = r.composer; back = () => go("chats"); }
       else { title = "Tchats"; body = chatsView(); }
@@ -359,7 +373,7 @@ function accountView() {
 
 /* ============ Planning ============ */
 function planningView() {
-  const teams = myTeams();
+  const teams = planTeams();
   const f = S.filter !== "all" && teams.includes(S.filter) ? S.filter : "all";
   const today = todayIso();
   let evs = D.events.filter(e => e.date >= today && e.teams.some(t => f === "all" ? teams.includes(t) : t === f));
@@ -376,6 +390,7 @@ function planningView() {
       : `<div class="notice">${I.user}<span>Aucun enfant n'est encore relié à ton compte. Demande au bureau de le faire.</span></div>`;
   }
   return `${intro}
+    ${canPlan() ? `<button class="btn" data-addev style="align-self:flex-start">＋ Ajouter un événement</button>` : ""}
     ${teams.length > 1 ? `<div class="chips"><button class="chip" data-filter="all" aria-pressed="${f === "all"}">Toutes</button>${teams.map(t => `<button class="chip" data-filter="${esc(t)}" aria-pressed="${f === t}"><span class="dot" style="background:${T(t).color}"></span>${esc(T(t).name)}</button>`).join("")}</div>` : ""}
     ${nextComp ? `<button class="card" data-trip="${tripOfEvent(nextComp.id).id}" style="text-align:left;display:flex;flex-direction:column;gap:4px;border-color:var(--gold)">
       <span class="eyebrow" style="color:var(--accent)">Prochaine compétition</span>
@@ -387,18 +402,66 @@ function planningView() {
     ${evs.length > shown.length ? `<button class="btn ghost" data-more>Voir la suite du planning</button>` : ""}`;
 }
 function eventCard(e) {
-  const teams = myTeams(), tr = e._trip || tripOfEvent(e.id), dep = e.type === "depart";
+  const teams = planTeams(), tr = e._trip || tripOfEvent(e.id), dep = e.type === "depart";
   const kids = me.role === "parent" ? e.teams.flatMap(childrenIn).map(c => first(c.full_name)) : [];
   return `<div class="card ev ${e.type}">
     <div class="time">${hm(e.start_time)}<small>${hm(e.end_time)}</small></div>
     <div class="body"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="tag ${e.type === "train" ? "train" : "comp"}">${e.type === "comp" ? "Compétition" : dep ? "Départ" : "Entraînement"}</span>${e.teams.filter(t => teams.includes(t)).map(teamChip).join("")}</div>
       <div class="title">${esc(e.title)}</div><div class="muted" style="font-size:13px">${esc(e.place)}</div>
       ${kids.length ? `<div style="font-size:13px">Concerne : ${kids.map(esc).join(", ")}</div>` : ""}
+      ${dep ? "" : attendanceBlock(e)}
       <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:2px">
         ${tr ? `<button class="btn small" data-trip="${tr.id}">Voir le déplacement</button>` : ""}
-        ${isBureau() && !dep ? (S.confirm === e.id ? `<button class="btn small danger" data-delev="${e.id}">Confirmer la suppression</button><button class="btn small ghost" data-cancel>Annuler</button>` : `<button class="btn small ghost" data-askdel="${e.id}">Supprimer</button>`) : ""}
+        ${canPlan() && !dep ? `<button class="btn small ghost" data-editev="${e.id}">Modifier</button>` : ""}
+        ${canPlan() && !dep ? (S.confirm === e.id ? `<button class="btn small danger" data-delev="${e.id}">Confirmer la suppression</button><button class="btn small ghost" data-cancel>Annuler</button>` : `<button class="btn small ghost" data-askdel="${e.id}">Supprimer</button>`) : ""}
       </div>
     </div></div>`;
+}
+
+/* ============ Présences aux entraînements ============ */
+function attOf(eid, aid) { return (D.attendance || []).find(a => a.event_id === eid && a.athlete_id === aid); }
+function rollAthletes(e) {
+  const teams = isBureau() ? e.teams : me.role === "coach" ? e.teams.filter(t => coachTeamsOf(me.id).includes(t)) : [];
+  return athletes().filter(a => teams.includes(a.team_id));
+}
+function attendanceBlock(e) {
+  let html = "";
+  const mine = myAthletes().filter(a => e.teams.includes(a.team_id));
+  for (const a of mine) {
+    const at = attOf(e.id, a.id), st = at && at.status, key = e.id + "|" + a.id;
+    html += `<div class="stack" style="gap:6px;border-top:1px solid var(--line);padding-top:8px;margin-top:4px">
+      <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${me.role === "parent" ? esc(first(a.full_name)) : "Ma présence"}</span>
+        <button class="btn small ${st === "present" ? "" : "ghost"}" data-att="${key}|present">✓ Présent·e</button>
+        <button class="btn small ${st === "absent" ? "danger" : "ghost"}" data-att="${key}|absent">✗ Absent·e</button></div>
+      ${st === "absent" ? `<div class="row" style="gap:6px;flex-wrap:wrap">
+          <input class="search" style="flex:1;min-width:150px;padding:7px 10px" id="why-${e.id}-${a.id}" data-why="${key}" value="${esc(at.reason || "")}" placeholder="Motif (malade, blessure…)" aria-label="Motif de l'absence">
+          ${at.file_path ? `<button class="link" style="font-size:13px" data-open="${esc(at.file_path)}">📎 ${esc(at.file_name || "Justificatif")}</button>` : ""}
+          <label class="btn small ghost">📷<input type="file" hidden accept="image/*" capture="environment" data-attfile="${key}" aria-label="Photo du justificatif"></label>
+          <label class="btn small ghost">📁 Justificatif<input type="file" hidden accept="image/*,.pdf" data-attfile="${key}"></label></div>` : ""}
+    </div>`;
+  }
+  const roll = rollAthletes(e);
+  if (roll.length) {
+    const n = s => roll.filter(a => (attOf(e.id, a.id) || {}).status === s).length, p = n("present"), ab = n("absent");
+    html += `<button class="row" data-roll="${e.id}" style="gap:8px;border:0;background:var(--surface-2);border-radius:10px;padding:8px 10px;font-size:13px;margin-top:4px;text-align:left;width:100%">
+      <span class="tag ok">${p} présent${p > 1 ? "s" : ""}</span><span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span><span class="muted">${roll.length - p - ab} sans réponse</span><span style="margin-left:auto;font-weight:700">Voir l'appel ›</span></button>`;
+  }
+  return html;
+}
+function rollView(id) {
+  const e = D.events.find(x => x.id === id); if (!e) return `<div class="empty">Cet événement n'existe plus.</div>`;
+  const roll = rollAthletes(e);
+  return `<div class="card"><b>${esc(e.title)}</b><br><span class="muted" style="text-transform:capitalize">${fmtDay(e.date)} · ${hm(e.start_time)}</span></div>
+    ${[...new Set(roll.map(a => a.team_id))].map(t => `<div class="daylabel">Équipe ${esc(T(t).name)}</div><div class="list">${roll.filter(a => a.team_id === t).map(a => { const at = attOf(e.id, a.id), st = at && at.status;
+      return `<div class="item" style="align-items:flex-start"><span class="av" style="width:36px;height:36px">${initials(a.full_name)}</span><span class="txt"><span class="t1">${esc(a.full_name)}</span>
+        ${st === "absent" ? `<span class="t2" style="white-space:normal">${esc(at.reason || "Pas de motif")}</span>${at.file_path ? `<button class="link" style="font-size:13px;padding:0;display:block" data-open="${esc(at.file_path)}">📎 Voir le justificatif</button>` : ""}` : ""}</span>
+        ${st === "present" ? '<span class="tag ok">Présent·e</span>' : st === "absent" ? '<span class="tag comp">Absent·e</span>' : '<span class="tag warn">Sans réponse</span>'}</div>`; }).join("")}</div>`).join("") || `<div class="empty">Aucun athlète dans ces équipes.</div>`}`;
+}
+async function saveAtt(eid, aid, patch) {
+  const cur = attOf(eid, aid) || { event_id: eid, athlete_id: aid, status: "absent", reason: "" };
+  const row = { event_id: eid, athlete_id: aid, status: cur.status, reason: cur.reason || "", file_path: cur.file_path || null, file_name: cur.file_name || null, ...patch, updated_by: me.id, updated_at: new Date().toISOString() };
+  const [res] = await q(sb.from("attendance").upsert(row).select());
+  D.attendance = (D.attendance || []).filter(a => !(a.event_id === eid && a.athlete_id === aid)).concat([res]);
 }
 
 /* ============ Tchats ============ */
@@ -514,9 +577,9 @@ function concerned(tr) {
 function presenceOf(tid, aid) { const p = D.presence.find(x => x.trip_id === tid && x.athlete_id === aid); return p && p.status; }
 function packedOf(tid, aid) { const ids = new Set(itemsOf(tid).map(i => i.id)); return D.packed.filter(p => p.athlete_id === aid && ids.has(p.item_id)).map(p => p.item_id); }
 function tripsView() {
-  const teams = myTeams(), today = todayIso();
+  const teams = planTeams(), today = todayIso();
   const list = tripList().map(tr => ({ tr, e: eventOf(tr) })).filter(x => x.e && x.e.date >= today && x.e.teams.some(t => teams.includes(t))).sort((a, b) => a.e.date.localeCompare(b.e.date));
-  if (!list.length) return `<div class="empty">Aucun déplacement prévu.${isBureau() ? "<br>Ajoute une compétition depuis l'espace bureau." : ""}</div>`;
+  if (!list.length) return `<div class="empty">Aucun déplacement prévu.${canPlan() ? "<br>Ajoute une compétition depuis le planning." : ""}</div>`;
   return `<p class="muted" style="margin:0">Pour chaque compétition : départ, transport, déroulé de la journée et affaires à emporter.</p>` + list.map(({ tr, e }) => {
     const c = concerned(tr), n = itemsOf(tr.id).length;
     const ok = c.length && c.every(a => presenceOf(tr.id, a.id) === "yes");
@@ -541,7 +604,7 @@ function tripView(id) {
     presence = `<div class="card stack"><h2>Présences (${ath.filter(a => presenceOf(id, a.id) === "yes").length}/${ath.length})</h2>${ath.map(a => { const st = presenceOf(id, a.id);
       return `<div class="row" style="justify-content:space-between"><span>${esc(a.full_name)} ${teamChip(a.team_id)}</span>${st === "yes" ? '<span class="tag ok">Présent·e</span>' : st === "no" ? '<span class="tag comp">Absent·e</span>' : '<span class="tag warn">Sans réponse</span>'}</div>`; }).join("") || '<span class="muted">Aucun athlète dans ces équipes.</span>'}</div>`; }
   const steps = stepsOf(id), days = tripDays(tr), multi = days.length > 1, legs = legsOf(id);
-  const edit = isBureau() && S.editTrip === id;
+  const edit = canPlan() && S.editTrip === id;
   const dayOpts = sel => days.map(d => `<option value="${d}" ${d === sel ? "selected" : ""}>${fmtShort(d)}</option>`).join("");
   return `
     <div class="hero">
@@ -553,7 +616,7 @@ function tripView(id) {
       <div><div class="lbl">Lieu de la compétition</div><div style="font-weight:600">${esc(e.place)}</div></div>
       ${tr.lodging ? `<div><div class="lbl">Hébergement</div><div style="font-weight:600">${esc(tr.lodging)}</div></div>` : ""}
     </div>
-    ${isBureau() ? (edit ? `<form id="tripForm" class="card stack"><h2>Modifier le déplacement</h2>
+    ${canPlan() ? (edit ? `<form id="tripForm" class="card stack"><h2>Modifier le déplacement</h2>
         <div class="grid2"><label class="field">Jour de départ<input id="tfDate" type="date" value="${tr.depart_date || e.date}"></label><label class="field">Heure de départ<input id="tfTime" type="time" value="${hm(tr.depart_time)}"></label></div>
         <div class="grid2"><label class="field">Jour de retour<input id="tfRDate" type="date" value="${tr.return_date || tr.depart_date || e.date}"></label><label class="field">Heure de retour<input id="tfRet" value="${esc(tr.return_time)}" placeholder="vers 3h du matin"></label></div>
         <label class="field">Hébergement<input id="tfLodging" value="${esc(tr.lodging || "")}" placeholder="Hôtel, adresse… (si nuit sur place)"></label>
@@ -563,21 +626,26 @@ function tripView(id) {
         <div class="row"><button class="btn small">Enregistrer</button><button type="button" class="btn small ghost" data-canceledit>Annuler</button></div></form>`
       : `<button class="btn small ghost" data-edittrip="${id}" style="align-self:flex-start">Modifier le départ, le transport…</button>`) : ""}
     ${presence}
-    ${legs.length || isBureau() ? `<div class="card stack"><h2>Trajets</h2>
+    ${legs.length || canPlan() ? `<div class="card stack"><h2>Trajets</h2>
       ${legs.map(l => `<div class="doc"><span class="fi" style="width:40px;height:40px;border-radius:10px;background:var(--accent-soft);display:grid;place-items:center;font-size:20px;flex:none">${MODES[l.mode] || "🚌"}</span>
-        <span class="txt"><b>${KINDS[l.kind] || "Trajet"} · ${esc(l.mode)}</b><span style="display:block;font-size:13.5px">${l.day ? fmtShort(l.day) : ""}${l.time ? " à " + hm(l.time) : ""}</span>
-        <small style="white-space:normal">${esc(l.from_place)}${l.to_place ? " → " + esc(l.to_place) : ""}${l.details ? " · " + esc(l.details) : ""}</small></span>
-        ${isBureau() ? `<button class="x" style="border:0;background:none;color:var(--muted);font-size:18px" data-delleg="${l.id}" aria-label="Retirer ce trajet">×</button>` : ""}</div>`).join("") || '<span class="muted">Ajoute l\'aller et le retour (bus, avion…).</span>'}
-      ${isBureau() ? `<details><summary style="font-weight:700;cursor:pointer">Ajouter un trajet</summary><form id="addleg" class="stack" style="margin-top:10px">
+        <span class="txt"><b>${KINDS[l.kind] || "Trajet"} · ${esc(l.mode)}</b>
+        <span style="display:block;font-size:13.5px"><span class="muted">Départ</span> ${l.day ? fmtShort(l.day) : ""}${l.time ? " à " + hm(l.time) : ""}${l.from_place ? " · " + esc(l.from_place) : ""}</span>
+        ${l.arrive_day || l.arrive_time || l.to_place ? `<span style="display:block;font-size:13.5px"><span class="muted">Arrivée</span> ${l.arrive_day ? fmtShort(l.arrive_day) : ""}${l.arrive_time ? " à " + hm(l.arrive_time) : ""}${l.to_place ? " · " + esc(l.to_place) : ""}</span>` : ""}
+        ${l.details ? `<small style="white-space:normal">${esc(l.details)}</small>` : ""}</span>
+        ${canPlan() ? `<button class="x" style="border:0;background:none;color:var(--muted);font-size:18px" data-delleg="${l.id}" aria-label="Retirer ce trajet">×</button>` : ""}</div>`).join("") || '<span class="muted">Ajoute l\'aller et le retour (bus, avion…).</span>'}
+      ${canPlan() ? `<details><summary style="font-weight:700;cursor:pointer">Ajouter un trajet</summary><form id="addleg" class="stack" style="margin-top:10px">
         <div class="grid2"><label class="field">Type<select id="lgKind"><option value="aller">Aller</option><option value="retour">Retour</option><option value="autre">Autre trajet</option></select></label>
           <label class="field">Transport<select id="lgMode">${Object.keys(MODES).map(m => `<option>${m}</option>`).join("")}</select></label></div>
-        <div class="grid2"><label class="field">Jour<select id="lgDay">${dayOpts(tr.depart_date || e.date)}</select></label><label class="field">Heure<input id="lgTime" type="time"></label></div>
-        <div class="grid2"><label class="field">Départ de<input id="lgFrom" placeholder="Pau"></label><label class="field">Arrivée à<input id="lgTo" placeholder="Orlando"></label></div>
+        <label class="field">Départ de<input id="lgFrom" placeholder="Pau"></label>
+        <div class="grid2"><label class="field">Jour de départ<select id="lgDay">${dayOpts(tr.depart_date || e.date)}</select></label><label class="field">Heure de départ<input id="lgTime" type="time"></label></div>
+        <label class="field">Arrivée à<input id="lgTo" placeholder="Aéroport de Toulouse"></label>
+        <div class="grid2"><label class="field">Jour d'arrivée<select id="lgADay"><option value="">–</option>${dayOpts("")}</select></label><label class="field">Heure d'arrivée<input id="lgATime" type="time"></label></div>
+        <p class="muted" style="margin:0;font-size:12.5px">Un trajet par moyen de transport : par exemple bus Pau → Toulouse, puis avion Toulouse → Orlando, puis bus jusqu'à l'hôtel.</p>
         <label class="field">Détails<input id="lgDetails" placeholder="N° de vol, compagnie, rendez-vous à l'aéroport…"></label>
         <button class="btn small" style="align-self:flex-start">Ajouter le trajet</button></form></details>` : ""}
     </div>` : ""}
-    <div class="card stack"><h2>${multi ? "Programme du déplacement" : "Déroulé de la journée"}</h2><div class="timeline">${steps.map((s, i) => `${multi && (i === 0 || steps[i - 1].day !== s.day) ? `<div class="daylabel" style="padding:4px 0 8px">${s.day ? fmtDay(s.day) : "Jour non précisé"}</div>` : ""}<div class="step"><span class="h">${hm(s.time)}</span><span class="bul"></span><span class="row" style="justify-content:space-between;align-items:flex-start"><span>${esc(s.label)}</span>${isBureau() ? `<button class="x" style="border:0;background:none;color:var(--muted);font-size:18px" data-delstep="${s.id}" aria-label="Retirer">×</button>` : ""}</span></div>`).join("") || '<span class="muted">Le déroulé sera bientôt précisé.</span>'}</div>
-      ${isBureau() ? `<form id="addstep" class="row" style="gap:6px;flex-wrap:wrap">${multi ? `<select id="stD" class="search" style="width:auto" aria-label="Jour">${dayOpts(S.lastStepDay || days[0])}</select>` : ""}<input id="stH" type="time" aria-label="Heure" class="search" style="width:110px"><input id="stL" aria-label="Étape" placeholder="Nouvelle étape" class="search"><button class="btn small">Ajouter</button></form>` : ""}
+    <div class="card stack"><h2>${multi ? "Programme du déplacement" : "Déroulé de la journée"}</h2><div class="timeline">${steps.map((s, i) => `${multi && (i === 0 || steps[i - 1].day !== s.day) ? `<div class="daylabel" style="padding:4px 0 8px">${s.day ? fmtDay(s.day) : "Jour non précisé"}</div>` : ""}<div class="step"><span class="h">${hm(s.time)}</span><span class="bul"></span><span class="row" style="justify-content:space-between;align-items:flex-start"><span>${esc(s.label)}</span>${canPlan() ? `<button class="x" style="border:0;background:none;color:var(--muted);font-size:18px" data-delstep="${s.id}" aria-label="Retirer">×</button>` : ""}</span></div>`).join("") || '<span class="muted">Le déroulé sera bientôt précisé.</span>'}</div>
+      ${canPlan() ? `<form id="addstep" class="row" style="gap:6px;flex-wrap:wrap">${multi ? `<select id="stD" class="search" style="width:auto" aria-label="Jour">${dayOpts(S.lastStepDay || days[0])}</select>` : ""}<input id="stH" type="time" aria-label="Heure" class="search" style="width:110px"><input id="stL" aria-label="Étape" placeholder="Nouvelle étape" class="search"><button class="btn small">Ajouter</button></form>` : ""}
     </div>
     ${bringBlock(tr)}
     ${tr.contact ? `<div class="card"><div class="eyebrow">Responsable du déplacement</div><div style="font-weight:600;margin-top:4px">${esc(tr.contact)}</div></div>` : ""}
@@ -585,7 +653,7 @@ function tripView(id) {
 }
 function bringBlock(tr) {
   const id = tr.id, items = itemsOf(id), t = items.length;
-  if (isBureau()) {
+  if (isBureau() || (canPlan() && !concerned(tr).length)) {
     const e = eventOf(tr), ath = athletes().filter(a => e.teams.includes(a.team_id));
     const ready = ath.filter(a => t && packedOf(id, a.id).length === t).length;
     return `<div class="card stack"><h2>À emporter</h2>
@@ -604,6 +672,7 @@ function bringBlock(tr) {
     <div class="row" style="gap:10px"><span class="bar" style="flex:1"><i style="width:${n / t * 100}%"></i></span><span style="font-weight:700;font-variant-numeric:tabular-nums">${n}/${t}</span></div>
     <div>${items.map(i => `<label class="check ${done.has(i.id) ? "done" : ""}"><input type="checkbox" data-pack="${sel.id}|${i.id}" ${done.has(i.id) ? "checked" : ""}><span>${esc(i.label)}</span></label>`).join("")}</div>
     <p class="muted" style="margin:0;font-size:12.5px">${c.length > 1 ? "Une liste par enfant." : "Coche au fur et à mesure que tu prépares ton sac."} Le bureau voit qui a terminé.</p>
+    ${canPlan() ? `<form id="addbring" class="row" style="gap:6px"><input id="brTxt" class="search" placeholder="Ajouter une affaire pour tous" aria-label="Nouvelle affaire"><button class="btn small">Ajouter</button></form>` : ""}
   </div>`;
 }
 
@@ -612,7 +681,7 @@ function docsOf(aid) { return D.docs.filter(d => d.athlete_id === aid); }
 function docsView() {
   if (isBureau() && !S.docFor) return bureauDocs();
   const kids = isBureau() ? [P(S.docFor)] : myAthletes();
-  if (!kids.length) return `<div class="empty">Aucun enfant n'est encore relié à ton compte. Demande au bureau de le faire.</div>`;
+  if (!kids.length) return `<div class="empty">${me.role === "coach" ? "Les dossiers des athlètes sont suivis par le bureau." : "Aucun enfant n'est encore relié à ton compte. Demande au bureau de le faire."}</div>`;
   const sel = kids.find(a => a.id === S.docFor) || kids[0], d = docsOf(sel.id);
   const have = DOC_TYPES.filter(t => d.some(x => x.doc_type === t)).length;
   const known = DOC_GROUPS.flatMap(g => g[1]);
@@ -677,12 +746,12 @@ function bureauView() {
   const qs = (S.q || "").toLowerCase();
   const all = Object.values(D.P).filter(p => p.id !== me.id);
   const pending = all.filter(p => p.role === "pending");
-  const groups = [["Bureau", all.filter(p => p.role === "bureau")],
+  const groups = [["Bureau", all.filter(p => p.role === "bureau")], ["Coachs", all.filter(p => p.role === "coach")],
     ...D.teams.map(t => ["Équipe " + t.name, [...all.filter(p => p.role === "athlete" && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
     ["Sans équipe ni enfant relié", all.filter(p => (p.role === "athlete" && !p.team_id) || (p.role === "parent" && !childrenOf(p.id).length))]];
   return `
     ${pending.length ? `<div class="card stack" style="border-color:var(--gold)"><h2>${pending.length} compte${pending.length > 1 ? "s" : ""} à valider</h2>
-      <div class="list">${pending.map(p => `<button class="item" data-member="${p.id}"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name || "Sans nom")}</span><span class="t2">Choisir : athlète, parent ou bureau</span></span><span class="tag warn">Valider</span></button>`).join("")}</div></div>` : ""}
+      <div class="list">${pending.map(p => `<button class="item" data-member="${p.id}"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name || "Sans nom")}</span><span class="t2">Choisir : athlète, parent, coach ou bureau</span></span><span class="tag warn">Valider</span></button>`).join("")}</div></div>` : ""}
     <div class="grid2">
       <button class="card" data-goview="annonce" style="text-align:left;display:flex;flex-direction:column;gap:6px;border-color:var(--gold)"><span style="color:var(--accent)">${I.mega}</span><b>Annonce à toutes les équipes</b><span class="muted" style="font-size:13px">Publiée dans chaque tchat d'équipe</span></button>
       <button class="card" data-goview="addEvent" style="text-align:left;display:flex;flex-direction:column;gap:6px"><span style="color:var(--accent)">${I.cal}</span><b>Ajouter au planning</b><span class="muted" style="font-size:13px">Entraînement ou compétition</span></button>
@@ -690,7 +759,7 @@ function bureauView() {
     <div class="eyebrow">Membres du club · message privé ou fiche</div>
     <input class="search" id="q" placeholder="Rechercher un nom…" aria-label="Rechercher">
     ${groups.map(([g, l]) => { l = l.filter(p => p.full_name.toLowerCase().includes(qs)); if (!l.length) return "";
-      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabel(p))}</span></span><button class="btn small ghost" data-member="${p.id}">Fiche</button><button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">${I.lock}</button></div>`).join("")}</div>`; }).join("")}`;
+      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabelFull(p))}</span></span><button class="btn small ghost" data-member="${p.id}">Fiche</button><button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">${I.lock}</button></div>`).join("")}</div>`; }).join("")}`;
 }
 function memberView(id) {
   const p = P(id);
@@ -701,16 +770,33 @@ function memberView(id) {
     <div class="card stack"><div class="row"><span class="av" style="width:44px;height:44px">${initials(p.full_name)}</span><span><b>${esc(p.full_name || "Sans nom")}</b><br><span class="muted" id="mEmailTxt" style="font-size:13px">${esc(S.memberEmail.email)}</span></span></div></div>
     <label class="field">Prénom et nom<input id="mName" value="${esc(p.full_name)}" required></label>
     <label class="field">Rôle<select id="mRole">
-      ${[["pending", "En attente (aucun accès)"], ["athlete", "Athlète"], ["parent", "Parent"], ["bureau", "Membre du bureau"]].map(([v, l]) => `<option value="${v}" ${role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      ${[["pending", "En attente (aucun accès)"], ["athlete", "Athlète"], ["parent", "Parent"], ["coach", "Coach"], ["bureau", "Membre du bureau"]].map(([v, l]) => `<option value="${v}" ${role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     ${role === "athlete" ? `<label class="field">Équipe<select id="mTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
+    ${role === "coach" ? `<div class="field">Équipes entraînées<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="mct" value="${t.id}" ${coachTeamsOf(id).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div><span class="muted" style="font-size:13px;font-weight:400">Le coach voit le planning, le tchat et l'appel de ces équipes.</span></div>` : ""}
     ${role === "bureau" ? `<label class="field">Fonction<input id="mTitle" value="${esc(p.title || "")}" placeholder="Président, trésorière, coach…"></label>` : ""}
     ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${athletes().map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)} ${a.team_id ? teamChip(a.team_id) : ""}</span></label>`).join("") || '<span class="muted">Valide d\'abord les comptes des athlètes.</span>'}</div></div>` : ""}
+    ${role !== "pending" ? (role === "bureau" ? `<p class="muted" style="margin:0;font-size:13px">Les membres du bureau peuvent toujours gérer le planning et les déplacements.</p>`
+      : `<label class="check card" style="padding:10px 12px"><input type="checkbox" id="mPlan" ${p.can_plan ? "checked" : ""}><span><b>Peut gérer le planning</b><br><span class="muted" style="font-size:13px">Ajouter, modifier et supprimer les événements, compétitions et déplacements.</span></span></label>`) : ""}
     ${role === "athlete" ? `<p class="muted" style="margin:0;font-size:13px">Parents reliés : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun pour l'instant (à faire depuis la fiche du parent)"}.</p>` : ""}
     <button class="btn">Enregistrer</button>
     <button type="button" class="btn ghost" data-conv="dm:${id}">Envoyer un message privé</button>
   </form>`;
 }
 
+function editEventView(id) {
+  const e = D.events.find(x => x.id === id);
+  if (!e) return `<div class="empty">Cet événement n'existe plus.</div>`;
+  const tr = tripOfEvent(id);
+  return `<form id="editev" class="stack">
+    <span class="tag ${e.type === "comp" ? "comp" : "train"}" style="align-self:flex-start">${e.type === "comp" ? "Compétition" : "Entraînement"}</span>
+    <label class="field">Titre<input id="eeTitle" value="${esc(e.title)}" required></label>
+    <div class="field">Équipes<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="eetm" value="${t.id}" ${e.teams.includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div></div>
+    <label class="field">Date<input id="eeDate" type="date" value="${e.date}" required></label>
+    <div class="grid2"><label class="field">Début<input id="eeS" type="time" value="${hm(e.start_time)}" required></label><label class="field">Fin<input id="eeE" type="time" value="${hm(e.end_time)}" required></label></div>
+    <label class="field">Lieu<input id="eePlace" value="${esc(e.place)}" required></label>
+    ${tr ? `<p class="muted" style="margin:0;font-size:13px">Le départ, les trajets et le programme se modifient dans la page du déplacement.</p><button type="button" class="btn ghost" data-trip="${tr.id}">Ouvrir le déplacement</button>` : ""}
+    <button class="btn">Enregistrer les modifications</button></form>`;
+}
 function annonceView() {
   return `<div class="notice">${I.mega}<span>Le message sera publié dans <b>chaque tchat d'équipe choisi</b>. Pour une information personnelle, utilise plutôt un message privé.</span></div>
   <form id="annonce" class="stack">
@@ -750,6 +836,22 @@ function bind() {
   on("[data-conv]", b => { S.loadedConv = null; go("chats", { kind: "conv", key: b.dataset.conv }); });
   on("[data-goview]", b => { S.evType = "train"; go("bureau", { kind: b.dataset.goview }); });
   on("[data-member]", b => { S.mRole = null; S.mKids = null; go("bureau", { kind: "member", id: b.dataset.member }); });
+  on("[data-roll]", b => go("planning", { kind: "roll", id: b.dataset.roll }));
+  on("[data-att]", async b => {
+    const [eid, aid, st] = b.dataset.att.split("|");
+    try { await saveAtt(eid, aid, { status: st }); render(0); toast(st === "present" ? "Présence notée" : "Absence notée : tu peux ajouter un motif et un justificatif"); } catch (e) { fail(e); }
+  });
+  on("[data-why]", async inp => { const [eid, aid] = inp.dataset.why.split("|"); try { await saveAtt(eid, aid, { reason: inp.value.trim() }); toast("Motif enregistré"); } catch (e) { fail(e); } }, "onchange");
+  on("[data-attfile]", async inp => {
+    let f = inp.files[0]; if (!f) return; const [eid, aid] = inp.dataset.attfile.split("|");
+    if (f.size > 10 * 1024 * 1024) return toast("Fichier trop lourd (10 Mo maximum).");
+    toast("Envoi en cours…");
+    try { f = await shrink(f); const path = `absences/${aid}/${Date.now()}-${safeName(f.name)}`;
+      const { error } = await sb.storage.from(BUCKET).upload(path, f, { contentType: f.type || undefined }); if (error) throw error;
+      await saveAtt(eid, aid, { file_path: path, file_name: f.name }); render(0); toast("Justificatif envoyé"); } catch (e) { fail(e, "L'envoi n'a pas marché. Réessaie."); }
+  }, "onchange");
+  on("[data-addev]", () => { S.evType = "train"; go("planning", { kind: "addEvent" }); });
+  on("[data-editev]", b => go("planning", { kind: "editEvent", id: b.dataset.editev }));
   on("[data-askdel]", b => { S.confirm = b.dataset.askdel; render(0); });
   on("[data-cancel]", () => { S.confirm = null; render(0); });
   on("[data-delev]", async b => { try { await q(sb.from("events").delete().eq("id", b.dataset.delev).select()); D.events = D.events.filter(e => e.id !== b.dataset.delev); S.confirm = null; render(0); toast("Supprimé du planning"); } catch (e) { fail(e); } });
@@ -838,9 +940,17 @@ function bind() {
         { trip_id: tr.id, kind: "retour", mode, day: rDate, from_place: val("evPlace"), to_place: val("trPlace"), details: val("trRet") ? "Arrivée prévue " + val("trRet") : "" }]).select());
       if (val("trTime")) await q(sb.from("trip_steps").insert({ trip_id: tr.id, day: dDate, time: val("trTime"), label: "Départ" }).select());
     }
-    await loadAll(); S.filter = "all"; go("planning"); toast(dates.length > 1 ? `${dates.length} entraînements ajoutés` : "Ajouté au planning");
+    await loadAll(); S.filter = "all"; S.tab = null; go("planning"); toast(dates.length > 1 ? `${dates.length} entraînements ajoutés` : "Ajouté au planning");
   });
 
+  form("editev", async f => {
+    const id = S.view.id, tms = [...f.querySelectorAll("[name=eetm]:checked")].map(x => x.value);
+    if (!tms.length) return toast("Choisis au moins une équipe.");
+    await q(sb.from("events").update({ title: val("eeTitle"), date: val("eeDate"), start_time: val("eeS"), end_time: val("eeE"), place: val("eePlace") }).eq("id", id).select());
+    await q(sb.from("event_teams").delete().eq("event_id", id).select());
+    await q(sb.from("event_teams").insert(tms.map(team_id => ({ event_id: id, team_id }))).select());
+    await loadAll(); S.tab = null; go("planning"); toast("Événement modifié");
+  });
   form("tripForm", async () => {
     const id = S.editTrip;
     const [row] = await q(sb.from("trips").update({ depart_date: val("tfDate") || null, return_date: val("tfRDate") || null, lodging: val("tfLodging"), depart_time: val("tfTime") || null, return_time: val("tfRet"), depart_place: val("tfPlace"), transport: val("tfTransport"), contact: val("tfContact") }).eq("id", id).select());
@@ -854,6 +964,8 @@ function bind() {
   });
   form("addleg", async () => {
     const row = { trip_id: S.view.id, kind: val("lgKind"), mode: val("lgMode"), day: val("lgDay") || null, time: val("lgTime") || null, from_place: val("lgFrom"), to_place: val("lgTo"), details: val("lgDetails") };
+    if (val("lgADay")) row.arrive_day = val("lgADay");
+    if (val("lgATime")) row.arrive_time = val("lgATime");
     const [res] = await q(sb.from("trip_legs").insert(row).select()); D.legs.push(res); S.skipRestore = true; render(0); toast("Trajet ajouté");
   });
   form("addbring", async () => {
@@ -868,8 +980,9 @@ function bind() {
   form("memberForm", async f => {
     const id = S.view.id, role = val("mRole");
     const upd = { full_name: val("mName"), role, team_id: role === "athlete" ? (val("mTeam") || null) : null, title: role === "bureau" ? val("mTitle") : null };
+    const mp = document.getElementById("mPlan"); if (mp) upd.can_plan = mp.checked; else if (role === "pending") upd.can_plan = false;
     if (role === "athlete" && !upd.team_id) return toast("Choisis l'équipe de l'athlète.");
-    const [row] = await q(sb.from("profiles").update(upd).eq("id", id).select("id,full_name,role,team_id,title"));
+    const [row] = await q(sb.from("profiles").update(upd).eq("id", id).select("*"));
     D.P[id] = row;
     if (role === "parent") {
       const kids = [...f.querySelectorAll("[name=mkid]:checked")].map(x => x.value);
@@ -877,11 +990,17 @@ function bind() {
       if (kids.length) await q(sb.from("parent_links").insert(kids.map(a => ({ parent_id: id, athlete_id: a }))).select());
       D.links = D.links.filter(l => l.parent_id !== id).concat(kids.map(a => ({ parent_id: id, athlete_id: a })));
     }
+    if (role === "coach" || (D.coachTeams || []).some(c => c.coach_id === id)) {
+      const ct = role === "coach" ? [...f.querySelectorAll("[name=mct]:checked")].map(x => x.value) : [];
+      await q(sb.from("coach_teams").delete().eq("coach_id", id).select());
+      if (ct.length) await q(sb.from("coach_teams").insert(ct.map(team_id => ({ coach_id: id, team_id }))).select());
+      D.coachTeams = (D.coachTeams || []).filter(c => c.coach_id !== id).concat(ct.map(team_id => ({ coach_id: id, team_id })));
+    }
     S.mRole = null; S.mKids = null; go("bureau"); toast("Fiche enregistrée");
   });
 
   form("nameForm", async () => {
-    const [row] = await q(sb.from("profiles").update({ full_name: val("accName") }).eq("id", me.id).select("id,full_name,role,team_id,title"));
+    const [row] = await q(sb.from("profiles").update({ full_name: val("accName") }).eq("id", me.id).select("*"));
     me = Object.assign(me, row); D.P[me.id] = me; render(0); toast("Nom enregistré");
   });
   form("passForm", async () => {
