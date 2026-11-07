@@ -46,6 +46,7 @@ function toast(msg) {
 function fail(e, msg) { console.error(e); toast(msg || "Une erreur est survenue. Vérifie ta connexion et réessaie."); }
 
 const I = {
+  home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>',
   bus: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="4" y="3" width="16" height="15" rx="3"/><path d="M4 11h16M8 21v-3M16 21v-3"/></svg>',
@@ -62,7 +63,7 @@ let session = null;
 let me = null;          // mon profil
 let myEmail = "";
 let D = null;           // données chargées
-let S = { tab: "planning", view: null, filter: "all", limit: 40 };
+let S = { tab: "home", view: null, filter: "all", limit: 40 };
 let recovery = false;
 let installEvt = null;
 const urlCache = {};
@@ -156,7 +157,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
@@ -172,11 +173,12 @@ async function loadAll() {
     q(sb.from("messages").select("*").order("created_at", { ascending: false }).limit(600)),
     q(sb.from("coach_teams").select("*")).catch(() => []),
     q(sb.from("attendance").select("*").gte("updated_at", addDays(todayIso(), -120))).catch(() => []),
+    q(sb.from("news").select("*").order("created_at", { ascending: false }).limit(60)).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance };
+  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news };
 }
 async function reload() { try { await loadAll(); render(); } catch (e) { fail(e); } }
 
@@ -212,12 +214,12 @@ function render(keepBottom) {
   if (recovery) { $app.innerHTML = recoveryView(); bindAuth(); return; }
   if (!me || me.role === "pending" || !D) { $app.innerHTML = pendingView(); bindAuth(); return; }
 
-  const tabs = [["planning", "Planning", I.cal], ["chats", "Tchats", I.chat], ["trips", "Déplacements", I.bus], ["docs", "Documents", I.doc]];
-  if (isBureau()) tabs.push(["bureau", "Bureau", I.mega]);
+  const tabs = [["home", "Accueil", I.home], ["planning", "Planning", I.cal], ["chats", "Tchats", I.chat], ["trips", "Trajets", I.bus], ["docs", "Documents", I.doc]];
   let title = "", body = "", back = null, composer = "";
   const v = S.view;
   try {
-    if (S.tab === "account") { title = "Mon compte"; body = accountView(); back = () => go("planning"); }
+    if (S.tab === "account") { title = "Mon compte"; body = accountView(); back = () => go("home"); }
+    if (S.tab === "home") { title = "Pau Cheerleading"; body = homeView(); }
     if (S.tab === "planning") {
       if (v && v.kind === "addEvent" && canPlan()) { title = "Ajouter au planning"; body = addEventView(); back = () => go("planning"); }
       else if (v && v.kind === "roll") { title = "Appel"; body = rollView(v.id); back = () => go("planning"); }
@@ -237,7 +239,7 @@ function render(keepBottom) {
       if (v && v.kind === "annonce") { title = "Annonce"; body = annonceView(); back = () => go("bureau"); }
       else if (v && v.kind === "addEvent") { title = "Ajouter au planning"; body = addEventView(); back = () => go("bureau"); }
       else if (v && v.kind === "member") { title = "Fiche membre"; body = memberView(v.id); back = () => go("bureau"); }
-      else { title = "Espace bureau"; body = bureauView(); }
+      else { title = "Espace bureau"; body = bureauView(); back = () => go("home"); }
     }
   } catch (e) { console.error(e); body = `<div class="empty">Cette page n'a pas pu s'afficher.</div>`; }
 
@@ -369,6 +371,54 @@ function accountView() {
     <form id="passForm" class="card stack"><h2>Changer de mot de passe</h2><label class="field">Nouveau mot de passe<input id="accPass" type="password" minlength="8" autocomplete="new-password" required></label><button class="btn small" style="align-self:flex-start">Changer</button></form>
     ${installCard()}
     <button class="btn ghost" id="logout">Se déconnecter</button>`;
+}
+
+/* ============ Accueil et actualités ============ */
+function homeView() {
+  const today = todayIso(), teams = planTeams();
+  const next = D.events.filter(e => e.date >= today && e.teams.some(t => teams.includes(t))).slice(0, 3);
+  const un = totalUnread();
+  const missing = myAthletes().reduce((n, a) => n + DOC_TYPES.filter(t => !docsOf(a.id).some(d => d.doc_type === t)).length, 0);
+  const pending = isBureau() ? Object.values(D.P).filter(p => p.role === "pending").length : 0;
+  const news = [...(D.news || [])].sort((a, b) => (b.pinned - a.pinned) || b.created_at.localeCompare(a.created_at));
+  const tile = (attr, big, label, warn) => `<button class="card" ${attr} style="text-align:left;display:flex;flex-direction:column;gap:2px;${warn ? "border-color:var(--gold)" : ""}"><span style="font-family:var(--display);font-size:24px;font-weight:800;line-height:1">${big}</span><span class="muted" style="font-size:13px">${label}</span></button>`;
+  return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:auto"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
+    <div class="grid2">
+      ${tile('data-tab="chats"', un, un > 1 ? "messages non lus" : "message non lu", un > 0)}
+      ${isBureau() ? tile('data-tab="bureau"', pending, "compte" + (pending > 1 ? "s" : "") + " à valider · Espace bureau", pending > 0)
+        : myAthletes().length ? tile('data-tab="docs"', missing, "document" + (missing > 1 ? "s" : "") + " à envoyer", missing > 0) : tile('data-tab="planning"', next.length, "prochains rendez-vous", false)}
+    </div>
+    ${next.length ? `<div class="card stack"><div class="row" style="justify-content:space-between"><h2>À venir</h2><button class="link" data-tab="planning">Tout le planning</button></div>
+      ${next.map(e => `<div class="row" style="gap:10px;align-items:flex-start"><span style="width:84px;flex:none;font-size:13px;font-weight:700;text-transform:capitalize;white-space:nowrap">${fmtShort(e.date).replace(/\.$/, "")}</span>
+        <span style="flex:1;min-width:0"><b>${esc(e.title)}</b> <span class="muted" style="font-size:13px">${hm(e.start_time)}</span><br>${e.teams.filter(t => teams.includes(t)).map(teamChip).join(" ")}</span></div>`).join("")}</div>` : ""}
+    <div class="row" style="justify-content:space-between;margin-top:4px"><h2 style="font-size:20px">Actualités du club</h2></div>
+    ${isBureau() ? `<details class="card"${S.newsOpen ? " open" : ""}><summary style="font-weight:700;cursor:pointer">＋ Publier une actualité</summary>
+      <form id="newsForm" class="stack" style="margin-top:10px">
+        <label class="field">Titre<input id="nwTitle" required placeholder="Ex : Bravo aux Servals, champions régionaux !"></label>
+        <label class="field">Texte<textarea id="nwBody" rows="5" placeholder="Raconte la nouvelle…"></textarea></label>
+        <label class="field">Photo (facultatif)<input id="nwImg" type="file" accept="image/*"></label>
+        <label class="check"><input type="checkbox" id="nwPin"><span>Épingler en haut de la page</span></label>
+        <p class="muted" style="margin:0;font-size:12.5px">L'actualité est visible par tous les membres du club : athlètes, parents, coachs et bureau.</p>
+        <button class="btn">Publier</button></form></details>` : ""}
+    ${news.map(n => `<article class="card stack" style="${n.pinned ? "border-color:var(--gold)" : ""}">
+      ${n.image_path ? `<img data-path="${esc(n.image_path)}" alt="" style="width:100%;border-radius:10px;max-height:320px;object-fit:cover;background:var(--surface-2);min-height:120px">` : ""}
+      <div class="row" style="gap:6px;flex-wrap:wrap">${n.pinned ? '<span class="tag comp">Épinglé</span>' : ""}<span class="muted" style="font-size:12.5px">${fmtDate(n.created_at)} · ${esc(P(n.created_by).full_name)}</span></div>
+      <h2>${esc(n.title)}</h2>
+      ${n.body ? `<div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(n.body)}</div>` : ""}
+      ${isBureau() ? `<div class="row" style="gap:6px"><button class="btn small ghost" data-pinnews="${n.id}">${n.pinned ? "Désépingler" : "Épingler"}</button>${S.confirmNews === n.id ? `<button class="btn small danger" data-delnews="${n.id}">Confirmer la suppression</button>` : `<button class="btn small ghost" data-askdelnews="${n.id}">Supprimer</button>`}</div>` : ""}
+    </article>`).join("") || `<div class="empty">Aucune actualité pour le moment.${isBureau() ? "<br>Publie la première avec le bouton ci-dessus." : ""}</div>`}
+    ${bureauBlock()}`;
+}
+function bureauBlock() {
+  const order = t => { const x = (t || "").toLowerCase(); return x.includes("présid") ? 0 : x.includes("vice") ? 1 : x.includes("trésor") ? 2 : x.includes("secr") ? 3 : 4; };
+  const members = Object.values(D.P).filter(p => p.role === "bureau").sort((a, b) => order(a.title) - order(b.title) || a.full_name.localeCompare(b.full_name));
+  if (!members.length) return "";
+  return `<h2 style="font-size:20px;margin-top:6px">Le bureau du club</h2>
+    <p class="muted" style="margin:0;font-size:13.5px">Pour toute question, écris directement à un membre du bureau. La conversation reste privée entre vous deux.</p>
+    <div class="list">${members.map(p => `<div class="item"><span class="av" style="width:42px;height:42px;font-size:14px">${initials(p.full_name)}</span>
+      <span class="txt"><span class="t1">${esc(p.full_name)}${p.id === me.id ? ' <span class="muted" style="font-weight:500">(toi)</span>' : ""}</span><span class="t2">${esc(p.title || "Membre du bureau")}</span></span>
+      ${p.id !== me.id ? `<button class="btn small" data-conv="dm:${p.id}">💬 Écrire</button>` : ""}</div>`).join("")}</div>
+    ${isBureau() ? `<p class="muted" style="margin:0;font-size:12.5px">La fonction de chaque membre (président, trésorière…) se règle dans sa fiche, onglet Espace bureau.</p>` : ""}`;
 }
 
 /* ============ Planning ============ */
@@ -838,6 +888,16 @@ function bind() {
   on("[data-conv]", b => { S.loadedConv = null; go("chats", { kind: "conv", key: b.dataset.conv }); });
   on("[data-goview]", b => { S.evType = "train"; go("bureau", { kind: b.dataset.goview }); });
   on("[data-member]", b => { S.mRole = null; S.mKids = null; go("bureau", { kind: "member", id: b.dataset.member }); });
+  on("[data-askdelnews]", b => { S.confirmNews = b.dataset.askdelnews; render(0); });
+  on("[data-delnews]", async b => {
+    const n = D.news.find(x => x.id === b.dataset.delnews); if (!n) return;
+    try { await q(sb.from("news").delete().eq("id", n.id).select()); if (n.image_path) await sb.storage.from(BUCKET).remove([n.image_path]);
+      D.news = D.news.filter(x => x.id !== n.id); S.confirmNews = null; render(0); toast("Actualité supprimée"); } catch (e) { fail(e); }
+  });
+  on("[data-pinnews]", async b => {
+    const n = D.news.find(x => x.id === b.dataset.pinnews); if (!n) return;
+    try { const [row] = await q(sb.from("news").update({ pinned: !n.pinned }).eq("id", n.id).select()); Object.assign(n, row); render(0); } catch (e) { fail(e); }
+  });
   on("[data-roll]", b => go("planning", { kind: "roll", id: b.dataset.roll }));
   on("[data-att]", async b => {
     const [eid, aid, st] = b.dataset.att.split("|");
@@ -946,6 +1006,15 @@ function bind() {
     await loadAll(); S.filter = "all"; S.tab = null; go("planning"); toast(dates.length > 1 ? `${dates.length} entraînements ajoutés` : "Ajouté au planning");
   });
 
+  form("newsForm", async () => {
+    const title = val("nwTitle"); if (!title) return toast("Donne un titre à l'actualité.");
+    let image_path = null; const inp = document.getElementById("nwImg"); let f = inp && inp.files[0];
+    if (f) { if (f.size > 10 * 1024 * 1024) return toast("Photo trop lourde (10 Mo maximum).");
+      toast("Envoi de la photo…"); f = await shrink(f); image_path = `news/${Date.now()}-${safeName(f.name)}`;
+      const { error } = await sb.storage.from(BUCKET).upload(image_path, f, { contentType: f.type || undefined }); if (error) throw error; }
+    const [row] = await q(sb.from("news").insert({ title, body: val("nwBody"), image_path, pinned: document.getElementById("nwPin").checked, created_by: me.id }).select());
+    D.news = [row].concat(D.news || []); S.newsOpen = false; S.skipRestore = true; render(0); toast("Actualité publiée");
+  });
   form("editev", async f => {
     const id = S.view.id, tms = [...f.querySelectorAll("[name=eetm]:checked")].map(x => x.value);
     if (!tms.length) return toast("Choisis au moins une équipe.");
