@@ -172,3 +172,11 @@ nav.tabs button[aria-current="page"]{color:#e4b448}
 .btn:not(.ghost):not(.danger){background:var(--gold-grad);color:#12110e}
 .badge{background:var(--gold-grad);color:#12110e}
 .brand img{width:200px;max-width:62%;border-radius:18px;box-shadow:0 6px 24px rgba(0,0,0,.25)}
+/* Choix femme / homme */
+.gpick .chip{gap:6px;padding:6px 14px 6px 10px;font-weight:600}
+.gpick input{position:absolute;opacity:0;pointer-events:none}
+.gpick .chip:focus-within{outline:2px solid var(--accent);outline-offset:2px}
+.gpick .g-F:has(input:checked){border-color:#e0559a;background:#fde7f1;color:#a3215f}
+.gpick .g-H:has(input:checked){border-color:#2f7fd8;background:#e3effc;color:#1b5aa6}
+.gpick .chip:not(:has(input:checked)) svg{opacity:.55}
+.gpick .chip{position:relative}
