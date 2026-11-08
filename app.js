@@ -191,7 +191,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
@@ -209,11 +209,12 @@ async function loadAll() {
     q(sb.from("attendance").select("*").gte("updated_at", addDays(todayIso(), -120))).catch(() => []),
     q(sb.from("news").select("*").order("created_at", { ascending: false }).limit(60)).catch(() => []),
     q(sb.from("profile_private").select("*")).catch(() => []),
+    q(sb.from("team_requests").select("*").order("created_at", { ascending: false }).limit(300)).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])) };
+  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs };
   await loadSummary();
 }
 // Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
@@ -266,6 +267,7 @@ function render(keepBottom) {
     if (S.tab === "planning") {
       if (v && v.kind === "addEvent" && canPlan()) { title = "Ajouter au planning"; body = addEventView(); back = () => go("planning"); }
       else if (v && v.kind === "roll") { title = "Appel"; body = rollView(v.id); back = () => go("planning"); }
+      else if (v && v.kind === "teams") { title = "Gérer les équipes"; body = teamsManageView(); back = () => go("planning"); }
       else if (v && v.kind === "editEvent" && canPlan()) { title = "Modifier"; body = editEventView(v.id); back = () => go("planning"); }
       else { title = "Planning"; body = planningView(); }
     }
@@ -446,6 +448,49 @@ function bindInstall() {
 window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; if (sb) render(); });
 
 /* ============ Mon compte ============ */
+/* Changements d'équipe */
+const coachesTeam = t => isBureau() || (me.role === "coach" && coachTeamsOf(me.id).includes(t));
+const manageTeams = () => isBureau() ? D.teams.map(t => t.id) : me.role === "coach" ? coachTeamsOf(me.id) : [];
+const reqsToDecide = () => (D.teamReqs || []).filter(r => r.status === "pending" && coachesTeam(r.to_team));
+const pendingReqOf = aid => (D.teamReqs || []).find(r => r.athlete_id === aid && r.status === "pending");
+function teamReqBlock(a) {
+  const r = pendingReqOf(a.id);
+  if (r) return `<div class="notice" style="flex-wrap:wrap">${I.user}<span style="flex:1">Demande de passage en <b>${esc(T(r.to_team).name)}</b> envoyée, en attente du coach.</span><button type="button" class="btn small ghost" data-cancelreq="${r.id}">Annuler la demande</button></div>`;
+  return `<div class="field">Demander un changement d'équipe<div class="row" style="gap:6px"><select class="search" data-reqteam="${a.id}" style="flex:1;min-width:0;padding:7px 10px"><option value="">Choisir la nouvelle équipe…</option>${D.teams.filter(t => t.id !== a.team_id).map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select><button type="button" class="btn small" data-sendreq="${a.id}">Demander</button></div>
+    <span class="muted" style="font-size:12.5px;font-weight:400">Le coach de la nouvelle équipe accepte ou refuse.</span></div>`;
+}
+function reqsCard() {
+  const l = reqsToDecide(); if (!l.length) return "";
+  return `<div class="card stack" style="border-color:var(--gold)"><h2>Demandes de changement d'équipe</h2>
+    ${l.map(r => `<div class="row" style="gap:8px;flex-wrap:wrap">${avatar(P(r.athlete_id), 32)}<span style="flex:1;min-width:140px"><b>${esc(P(r.athlete_id).full_name)}</b><br><span class="muted" style="font-size:13px">${r.from_team ? esc(T(r.from_team).name) : "Sans équipe"} → ${esc(T(r.to_team).name)} · demandé par ${esc(first(P(r.requested_by).full_name))}</span></span>
+      <button class="btn small" data-decide="${r.id}|1">Accepter</button><button class="btn small ghost" data-decide="${r.id}|0">Refuser</button></div>`).join("")}</div>`;
+}
+// Le coach (ou le bureau) répartit ses athlètes, par exemple au changement de saison
+function teamsManageView() {
+  const mine = manageTeams(), q2 = (S.tq || "").toLowerCase();
+  const list = athletes().filter(a => mine.includes(a.team_id) && a.full_name.toLowerCase().includes(q2));
+  return `<div class="notice">${I.user}<span>Choisis la nouvelle équipe de chaque athlète, puis touche « Enregistrer les changements ». Pratique au changement de saison.</span></div>
+    ${reqsCard()}
+    <input class="search" id="tq" placeholder="Rechercher un athlète…" aria-label="Rechercher">
+    ${mine.map(t => { const l = list.filter(a => a.team_id === t); return l.length ? `<div class="daylabel">Équipe ${esc(T(t).name)} · ${l.length}</div><div class="list">${l.map(a => `<div class="item">${avatar(a, 36)}<span class="txt"><span class="t1">${esc(a.full_name)}</span>${a.birth_date ? `<span class="t2">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""}</span>
+      <select class="search" data-move="${a.id}" style="max-width:150px;padding:7px 10px">${D.teams.map(x => `<option value="${x.id}" ${x.id === a.team_id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}<option value="">Sans équipe</option></select></div>`).join("")}</div>` : ""; }).join("") || `<div class="empty">Aucun athlète dans tes équipes.</div>`}
+    <button class="btn" data-savemoves>Enregistrer les changements</button>`;
+}
+// « Mes enfants » : pour tout membre (un membre du bureau ou un coach peut aussi être parent)
+function myKidsCard() {
+  if (me.role === "pending") return "";
+  const pend = D.links.filter(l => l.parent_id === me.id).map(l => P(l.athlete_id)).filter(c => c.role === "pending");
+  const others = isBureau() ? athletes().filter(a => a.id !== me.id && !D.links.some(l => l.parent_id === me.id && l.athlete_id === a.id)) : [];
+  return `<div class="card stack"><h2>${childrenOf(me.id).length ? "Ajouter un autre enfant" : "Mes enfants au club"}</h2>
+    ${pend.map(c => `<div class="row" style="gap:8px">${avatar(c, 32)}<span style="flex:1">${esc(c.full_name)}</span><span class="tag warn">en attente du bureau</span></div>`).join("")}
+    <div class="grid2"><label class="field">Prénom<input id="mkFirst"></label><label class="field">Nom<input id="mkLast" value="${esc(splitName(me.full_name)[1])}"></label></div>
+    <div class="grid2"><label class="field">Date de naissance<input id="mkBirth" type="date"></label><label class="field">Équipe<select id="mkTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></label></div>
+    <div class="field">Sexe${genderPick("mkGender", null, true)}</div>
+    <button type="button" class="btn small" data-addmykid style="align-self:flex-start">Ajouter mon enfant</button>
+    ${isBureau() ? "" : `<p class="muted" style="margin:0;font-size:12.5px">Le bureau valide l'ajout. Si ton enfant est déjà inscrit (par l'autre parent), demande au bureau de te relier à lui.</p>`}
+    ${others.length ? `<div class="field">Ou relier un athlète déjà inscrit<div class="row" style="gap:6px"><select class="search" id="mkLink" style="flex:1;min-width:0;padding:7px 10px"><option value="">Choisir…</option>${others.map(a => `<option value="${a.id}">${esc(a.full_name)}${a.team_id ? " · " + esc(T(a.team_id).name) : ""}</option>`).join("")}</select><button type="button" class="btn small" data-linkmykid>Relier</button></div></div>` : ""}
+  </div>`;
+}
 function accountView() {
   return `<div class="card stack"><div class="row">${avatar(me, 56)}<span><b style="font-size:17px">${esc(me.full_name)}</b><br><span class="muted">${esc(roleLabel(me))}</span></span></div>
       <span class="muted" style="font-size:13.5px">${esc(myEmail)}</span>
@@ -454,6 +499,7 @@ function accountView() {
       ${nameFields("acc", me.full_name)}
       <div class="field">Sexe${genderPick("accGender", PV(me.id).gender)}</div>
       ${consentPick("accConsent", PV(me.id).image_consent, "de mon image")}
+      ${isBureau() ? `<label class="field">Je pratique aussi comme athlète dans l'équipe<select id="accTeam"><option value="">Non, je ne suis pas athlète</option>${D.teams.map(t => `<option value="${t.id}" ${me.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
       <label class="field">Téléphone<input id="accPhone" type="tel" value="${esc(PV(me.id).phone || "")}" placeholder="06 12 34 56 78"></label>
       ${isAth(me) ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
         <div class="grid2"><label class="field">Nom<input id="accEmName" value="${esc(PV(me.id).emergency_name || "")}"></label><label class="field">Téléphone<input id="accEmPhone" type="tel" value="${esc(PV(me.id).emergency_phone || "")}"></label></div>` : ""}
@@ -466,8 +512,11 @@ function accountView() {
       <label class="check"><input type="checkbox" name="kLegal" ${isLegal(me.id, c.id) ? "checked" : ""}><span>Je suis <b>responsable légal</b> de ${esc(first(c.full_name))}</span></label>
       <div class="eyebrow">Personne à contacter en cas de problème</div>
       <div class="grid2"><label class="field">Nom<input name="kEmName" value="${esc(PV(c.id).emergency_name || "")}"></label><label class="field">Téléphone<input name="kEmPhone" type="tel" value="${esc(PV(c.id).emergency_phone || "")}"></label></div>
+      ${c.role === "athlete" || isAth(c) ? teamReqBlock(c) : ""}
       <span class="muted" style="font-size:12.5px">Autre(s) parent(s) : ${parentsOf(c.id).filter(x => x.id !== me.id).map(x => esc(x.full_name) + (isLegal(x.id, c.id) ? " (responsable légal)" : "")).join(", ") || "aucun dans l'app"}</span>
       <button class="btn small" style="align-self:flex-start">Enregistrer</button></form>`).join("") : ""}
+    ${me.role === "athlete" ? `<div class="card stack"><h2>Mon équipe : ${me.team_id ? esc(T(me.team_id).name) : "aucune"}</h2>${teamReqBlock(me)}</div>` : ""}
+    ${myKidsCard()}
     <form id="passForm" class="card stack"><h2>Changer de mot de passe</h2><label class="field">Nouveau mot de passe<input id="accPass" type="password" minlength="8" autocomplete="new-password" required></label><button class="btn small" style="align-self:flex-start">Changer</button></form>
     ${installCard()}
     <button class="btn ghost" id="logout">Se déconnecter</button>`;
@@ -479,7 +528,7 @@ function homeView() {
   const next = D.events.filter(e => e.date >= today && e.teams.some(t => teams.includes(t))).slice(0, 3);
   const un = totalUnread();
   const missing = myAthletes().reduce((n, a) => n + DOC_TYPES.filter(t => !docsOf(a.id).some(d => d.doc_type === t)).length, 0);
-  const pending = isBureau() ? Object.values(D.P).filter(p => p.role === "pending" && !p.managed).length : 0;
+  const pending = isBureau() ? Object.values(D.P).filter(p => p.id !== me.id && p.role === "pending" && (!p.managed || (parentsOf(p.id).length && parentsOf(p.id).every(x => x.role !== "pending")))).length : 0;
   const news = [...(D.news || [])].sort((a, b) => (b.pinned - a.pinned) || b.created_at.localeCompare(a.created_at));
   const tile = (attr, big, label, warn) => `<button class="card" ${attr} style="text-align:left;display:flex;flex-direction:column;gap:2px;${warn ? "border-color:var(--gold)" : ""}"><span style="font-family:var(--display);font-size:24px;font-weight:800;line-height:1">${big}</span><span class="muted" style="font-size:13px">${label}</span></button>`;
   return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:64px;border-radius:12px"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
@@ -489,6 +538,7 @@ function homeView() {
       ${isBureau() ? tile('data-tab="bureau"', pending, "compte" + (pending > 1 ? "s" : "") + " à valider · Espace bureau", pending > 0)
         : myAthletes().length ? tile('data-tab="docs"', missing, "document" + (missing > 1 ? "s" : "") + " à envoyer", missing > 0) : tile('data-tab="planning"', next.length, "prochains rendez-vous", false)}
     </div>
+    ${reqsCard()}
     ${next.length ? `<div class="card stack"><div class="row" style="justify-content:space-between"><h2>À venir</h2><button class="link" data-tab="planning">Tout le planning</button></div>
       ${next.map(e => `<div class="row" style="gap:10px;align-items:flex-start"><span style="width:84px;flex:none;font-size:13px;font-weight:700;text-transform:capitalize;white-space:nowrap">${fmtShort(e.date).replace(/\.$/, "")}</span>
         <span style="flex:1;min-width:0"><b>${esc(e.title)}</b> <span class="muted" style="font-size:13px">${hm(e.start_time)}</span><br>${e.teams.filter(t => teams.includes(t)).map(teamChip).join(" ")}</span></div>`).join("")}</div>` : ""}
@@ -542,7 +592,7 @@ function planningView() {
       : `<div class="notice">${I.user}<span>Aucun enfant n'est encore relié à ton compte. Demande au bureau de le faire.</span></div>`;
   }
   return `${intro}
-    ${canPlan() ? `<button class="btn" data-addev style="align-self:flex-start">＋ Ajouter un événement</button>` : ""}
+    ${canPlan() || manageTeams().length ? `<div class="row" style="gap:8px;flex-wrap:wrap">${canPlan() ? `<button class="btn" data-addev>＋ Ajouter un événement</button>` : ""}${manageTeams().length ? `<button class="btn ghost" data-manageteams>👥 Gérer les équipes${reqsToDecide().length ? ` (${reqsToDecide().length})` : ""}</button>` : ""}</div>` : ""}
     ${teams.length > 1 ? `<div class="chips">${hasMine ? `<button class="chip" data-filter="mine" aria-pressed="${f === "mine"}">${own.length > 1 ? "Mes équipes" : "Mon équipe"}</button>` : ""}<button class="chip" data-filter="all" aria-pressed="${f === "all"}">Toutes</button>${teams.map(t => `<button class="chip" data-filter="${esc(t)}" aria-pressed="${f === t}"><span class="dot" style="background:${T(t).color}"></span>${esc(T(t).name)}</button>`).join("")}</div>` : ""}
     ${nextComp ? `<button class="card" data-trip="${tripOfEvent(nextComp.id).id}" style="text-align:left;display:flex;flex-direction:column;gap:4px;border-color:var(--gold)">
       <span class="eyebrow" style="color:var(--accent)">Prochaine compétition</span>
@@ -988,8 +1038,9 @@ async function uploadDoc(aid, type, file) {
 function bureauView() {
   const qs = (S.q || "").toLowerCase();
   const all = Object.values(D.P).filter(p => p.id !== me.id);
-  const pending = all.filter(p => p.role === "pending" && !p.managed);
-  const askOf = p => p.wish === "parent" ? "Parent" + (D.links.some(l => l.parent_id === p.id) ? " de " + D.links.filter(l => l.parent_id === p.id).map(l => first(P(l.athlete_id).full_name)).join(", ") : "")
+  const pending = all.filter(p => p.role === "pending" && (!p.managed || (parentsOf(p.id).length && parentsOf(p.id).every(x => x.role !== "pending"))));
+  const askOf = p => p.managed ? "Enfant ajouté par " + parentsOf(p.id).map(x => x.full_name).join(", ") + (p.team_id ? " · " + T(p.team_id).name : "")
+    : p.wish === "parent" ? "Parent" + (D.links.some(l => l.parent_id === p.id) ? " de " + D.links.filter(l => l.parent_id === p.id).map(l => first(P(l.athlete_id).full_name)).join(", ") : "")
     : p.wish === "athlete" ? "Athlète" + (p.team_id ? " · " + T(p.team_id).name : "") : "Coach, bureau ou autre";
   const groups = [["Bureau", all.filter(p => p.role === "bureau")], ["Coachs", all.filter(p => p.role === "coach")],
     ...D.teams.map(t => ["Équipe " + t.name, [...all.filter(p => isAth(p) && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
@@ -1127,6 +1178,33 @@ function bind() {
       const { error } = await sb.storage.from(BUCKET).upload(path, f, { contentType: f.type || undefined }); if (error) throw error;
       await saveAtt(eid, aid, { file_path: path, file_name: f.name }); render(0); toast("Justificatif envoyé"); } catch (e) { fail(e, "L'envoi n'a pas marché. Réessaie."); }
   }, "onchange");
+  on("[data-manageteams]", () => go("planning", { kind: "teams" }));
+  const tq = document.getElementById("tq"); if (tq) { tq.value = S.tq || ""; tq.oninput = () => { S.tq = tq.value; render(0); const t = document.getElementById("tq"); if (t) { t.focus(); t.setSelectionRange(t.value.length, t.value.length); } }; }
+  on("[data-savemoves]", async () => {
+    const ch = [...$app.querySelectorAll("[data-move]")].filter(s => (s.value || null) !== (P(s.dataset.move).team_id || null));
+    if (!ch.length) return toast("Aucun changement.");
+    try { for (const s of ch) await q(sb.rpc("set_athlete_team", { a: s.dataset.move, t: s.value || null }));
+      await loadAll(); render(0); toast(ch.length > 1 ? `${ch.length} athlètes changés d'équipe` : "Changement d'équipe enregistré"); } catch (e) { fail(e); }
+  });
+  on("[data-decide]", async b => { const [id, ok] = b.dataset.decide.split("|");
+    try { await q(sb.rpc("decide_team_request", { r: id, ok: ok === "1" })); await loadAll(); render(0); toast(ok === "1" ? "Changement d'équipe accepté" : "Demande refusée"); } catch (e) { fail(e); } });
+  on("[data-sendreq]", async b => { const aid = b.dataset.sendreq, sel = $app.querySelector(`[data-reqteam="${aid}"]`), to = sel && sel.value;
+    if (!to) return toast("Choisis la nouvelle équipe.");
+    try { const [r] = await q(sb.from("team_requests").insert({ athlete_id: aid, from_team: P(aid).team_id || null, to_team: to, requested_by: me.id, status: "pending" }).select());
+      D.teamReqs = [r].concat(D.teamReqs || []); render(0); toast("Demande envoyée au coach"); } catch (e) { fail(e); } });
+  on("[data-cancelreq]", async b => { try { await q(sb.from("team_requests").update({ status: "cancelled" }).eq("id", b.dataset.cancelreq).select());
+      D.teamReqs = (D.teamReqs || []).map(r => r.id === b.dataset.cancelreq ? { ...r, status: "cancelled" } : r); render(0); toast("Demande annulée"); } catch (e) { fail(e); } });
+  on("[data-addmykid]", async () => {
+    const g = id => (document.getElementById(id) || {}).value || "";
+    if (!g("mkFirst").trim() || !g("mkLast").trim()) return toast("Indique le prénom et le nom de ton enfant.");
+    try { const cid = await q(sb.rpc("add_child", { p_parent: me.id, p_first: g("mkFirst"), p_last: g("mkLast"), p_birth: g("mkBirth") || null, p_team: g("mkTeam") || null }));
+      const gd = $app.querySelector("[name=mkGender]:checked"); if (cid && gd) await savePriv(cid, { gender: gd.value }).catch(() => {});
+      await loadAll(); render(0); toast(isBureau() ? "Enfant ajouté" : "Enfant ajouté : le bureau va valider"); } catch (e) { fail(e, e && /déjà inscrit/.test(e.message || "") ? "Cet enfant est déjà inscrit : demande au bureau de te relier à lui." : undefined); }
+  });
+  on("[data-linkmykid]", async () => {
+    const a = (document.getElementById("mkLink") || {}).value; if (!a) return toast("Choisis l'athlète.");
+    try { await q(sb.from("parent_links").insert({ parent_id: me.id, athlete_id: a }).select()); D.links.push({ parent_id: me.id, athlete_id: a }); render(0); toast("Enfant relié à ton compte"); } catch (e) { fail(e); }
+  });
   on("[data-addchild]", async b => {
     const g = id => (document.getElementById(id) || {}).value || "", pid = b.dataset.addchild;
     if (!g("akFirst").trim() || !g("akLast").trim()) return toast("Indique le prénom et le nom de l'enfant.");
@@ -1333,7 +1411,8 @@ function bind() {
   });
 
   form("nameForm", async () => {
-    const [row] = await q(sb.from("profiles").update({ full_name: joinName("acc") }).eq("id", me.id).select("*"));
+    const upd = { full_name: joinName("acc") }; if (document.getElementById("accTeam")) upd.team_id = val("accTeam") || null;
+    const [row] = await q(sb.from("profiles").update(upd).eq("id", me.id).select("*"));
     me = Object.assign(me, row); D.P[me.id] = me;
     const g = $app.querySelector("[name=accGender]:checked"), patch = { gender: g ? g.value : null, phone: val("accPhone"), image_consent: consentVal($app, "accConsent") };
     if (document.getElementById("accEmName")) { patch.emergency_name = val("accEmName"); patch.emergency_phone = val("accEmPhone"); }
