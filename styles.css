@@ -1,19 +1,25 @@
 
 /* Layout: une colonne "téléphone" centrée, en-tête collant, barre d'onglets en bas */
 :root{
-  --bg:#f7f6f2; --surface:#ffffff; --surface-2:#efede6; --ink:#151410; --muted:#6a675c; --line:#e3e0d6;
-  --accent:#8a6400; --accent-soft:#fbf0c8; --on-accent:#151410; --gold:#f5c000; --navy:#151410; --navy-soft:#f1ead0;
+  --bg:#f6f4ef; --surface:#ffffff; --surface-2:#eeebe3; --ink:#12110e; --muted:#67635a; --line:#e2ded3;
+  --accent:#87570f; --accent-soft:#f7ecd2; --on-accent:#12110e; --gold:#d8a83c; --navy:#12110e; --navy-soft:#f1e6c9;
+  --gold-grad:linear-gradient(135deg,#f3cf6a 0%,#d8a83c 45%,#b07a22 100%);
+  --bar:#0a0a09; --bar-ink:#f4efe3; --bar-soft:#1f1c16; --bar-line:#2b271f;
   --ok:#0f8a5f; --ok-soft:#dcf3e9; --warn:#b25e00; --warn-soft:#fdebd3;
   --display:"Bricolage Grotesque", "Arial Rounded MT Bold", system-ui, sans-serif;
   --body:"Figtree", system-ui, -apple-system, "Segoe UI", sans-serif;
 }
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
-  --bg:#0f0e0b; --surface:#1a1915; --surface-2:#25231d; --ink:#f3f1ea; --muted:#a9a596; --line:#302d25;
-  --accent:#f5c518; --accent-soft:#3a3010; --on-accent:#151410; --gold:#f5c518; --navy:#f5c518; --navy-soft:#2e2812;
+  --bg:#070706; --surface:#141310; --surface-2:#1f1d18; --ink:#f4efe3; --muted:#aaa392; --line:#2b271f;
+  --accent:#e4b448; --accent-soft:#30260f; --on-accent:#12110e; --gold:#d8a83c; --navy:#e4b448; --navy-soft:#2c2412;
+  --gold-grad:linear-gradient(135deg,#f3cf6a 0%,#d8a83c 45%,#b07a22 100%);
+  --bar:#000000; --bar-ink:#f4efe3; --bar-soft:#1c1a15; --bar-line:#25221b;
   --ok:#4fd1a0; --ok-soft:#173a2e; --warn:#f5a54a; --warn-soft:#3b2a14; color-scheme:dark}}
 :root[data-theme="dark"]{
-  --bg:#0f0e0b; --surface:#1a1915; --surface-2:#25231d; --ink:#f3f1ea; --muted:#a9a596; --line:#302d25;
-  --accent:#f5c518; --accent-soft:#3a3010; --on-accent:#151410; --gold:#f5c518; --navy:#f5c518; --navy-soft:#2e2812;
+  --bg:#070706; --surface:#141310; --surface-2:#1f1d18; --ink:#f4efe3; --muted:#aaa392; --line:#2b271f;
+  --accent:#e4b448; --accent-soft:#30260f; --on-accent:#12110e; --gold:#d8a83c; --navy:#e4b448; --navy-soft:#2c2412;
+  --gold-grad:linear-gradient(135deg,#f3cf6a 0%,#d8a83c 45%,#b07a22 100%);
+  --bar:#000000; --bar-ink:#f4efe3; --bar-soft:#1c1a15; --bar-line:#25221b;
   --ok:#4fd1a0; --ok-soft:#173a2e; --warn:#f5a54a; --warn-soft:#3b2a14; color-scheme:dark}
 html,body{height:100%}
 body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.45}
@@ -152,3 +158,17 @@ img{max-width:100%}
 .item .btn svg{width:16px;height:16px}
 .ev.depart{border-style:dashed;border-color:var(--gold)}
 .grid2 > *, .grid2 input, .grid2 select { min-width: 0; } .grid2 input, .grid2 select { width: 100%; box-sizing: border-box; }
+
+/* Couleurs du club : barres noires, or métallisé */
+header.top{background:var(--bar);border-bottom-color:var(--bar-line);color:var(--bar-ink)}
+body::before{background:var(--bar)}
+header.top .back{background:var(--bar-soft);color:var(--bar-ink)}
+header.top .who{background:var(--bar-soft);border-color:var(--bar-line);color:var(--bar-ink)}
+header.top .who .av{background:var(--gold-grad);color:#12110e}
+.hlogo{width:36px;height:36px;border-radius:8px;object-fit:cover}
+nav.tabs .inner{background:var(--bar);border-top-color:var(--bar-line)}
+nav.tabs button{color:#9d978a}
+nav.tabs button[aria-current="page"]{color:#e4b448}
+.btn:not(.ghost):not(.danger){background:var(--gold-grad);color:#12110e}
+.badge{background:var(--gold-grad);color:#12110e}
+.brand img{width:200px;max-width:62%;border-radius:18px;box-shadow:0 6px 24px rgba(0,0,0,.25)}

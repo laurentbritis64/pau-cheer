@@ -444,7 +444,7 @@ function homeView() {
   const pending = isBureau() ? Object.values(D.P).filter(p => p.role === "pending" && !p.managed).length : 0;
   const news = [...(D.news || [])].sort((a, b) => (b.pinned - a.pinned) || b.created_at.localeCompare(a.created_at));
   const tile = (attr, big, label, warn) => `<button class="card" ${attr} style="text-align:left;display:flex;flex-direction:column;gap:2px;${warn ? "border-color:var(--gold)" : ""}"><span style="font-family:var(--display);font-size:24px;font-weight:800;line-height:1">${big}</span><span class="muted" style="font-size:13px">${label}</span></button>`;
-  return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:auto"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
+  return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:64px;border-radius:12px"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
     <div class="grid2">
       ${tile('data-tab="chats"', un, un > 1 ? "messages non lus" : "message non lu", un > 0)}
       ${isBureau() ? tile('data-tab="bureau"', pending, "compte" + (pending > 1 ? "s" : "") + " à valider · Espace bureau", pending > 0)
