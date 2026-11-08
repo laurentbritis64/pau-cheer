@@ -187,7 +187,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
@@ -204,11 +204,12 @@ async function loadAll() {
     q(sb.from("coach_teams").select("*")).catch(() => []),
     q(sb.from("attendance").select("*").gte("updated_at", addDays(todayIso(), -120))).catch(() => []),
     q(sb.from("news").select("*").order("created_at", { ascending: false }).limit(60)).catch(() => []),
+    q(sb.from("profile_private").select("*")).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {} };
+  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])) };
   await loadSummary();
 }
 // Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
@@ -309,7 +310,7 @@ function render(keepBottom) {
 
 /* ============ Connexion ============ */
 function teamOptions(sel) { return (S.signupTeams || TEAM_LIST).map(([id, name]) => `<option value="${id}" ${sel === id ? "selected" : ""}>${esc(name)}</option>`).join(""); }
-function readKids() { return [...$app.querySelectorAll("[data-kid]")].map(c => ({ first: c.querySelector("[name=kFirst]").value.trim(), last: c.querySelector("[name=kLast]").value.trim(), birth: c.querySelector("[name=kBirth]").value, team: c.querySelector("[name=kTeam]").value })); }
+function readKids() { return [...$app.querySelectorAll("[data-kid]")].map(c => ({ first: c.querySelector("[name=kFirst]").value.trim(), last: c.querySelector("[name=kLast]").value.trim(), birth: c.querySelector("[name=kBirth]").value, team: c.querySelector("[name=kTeam]").value, gender: c.querySelector("[name=kGender]").value })); }
 function authView() {
   const m = S.auth || "login";
   const head = `<div class="brand"><img src="icons/logo.webp" alt="Logo Pau Cheerleading"><div class="eyebrow">Application du club</div><div class="logo">Pau<br><span>Cheerleading</span></div></div>`;
@@ -317,14 +318,21 @@ function authView() {
     <form id="signup" class="authbox"><h2>Créer mon compte</h2>
       <div class="field">Je suis<div class="chips">${[["parent", "Parent"], ["athlete", "Athlète"], ["other", "Coach ou bureau"]].map(([v, l]) => `<label class="chip"><input type="radio" name="suKind" value="${v}" ${S.suKind === v ? "checked" : ""}> ${l}</label>`).join("")}</div></div>
       <div class="grid2"><label class="field">Prénom<input id="suFirst" autocomplete="given-name" required></label><label class="field">Nom<input id="suLast" autocomplete="family-name" required></label></div>
+      <div class="field">Tu es${genderPick("suGender", S.suGender)}</div>
+      <label class="field">Téléphone<input id="suPhone" type="tel" autocomplete="tel" placeholder="06 12 34 56 78" required></label>
       ${S.suKind === "athlete" ? `<div class="grid2"><label class="field">Date de naissance<input id="suBirth" type="date" required></label><label class="field">Équipe<select id="suTeam" required><option value="">Choisir…</option>${teamOptions()}</select></label></div>` : ""}
       ${S.suKind === "parent" ? `<div class="stack" style="gap:8px"><div class="eyebrow">Mes enfants inscrits au club</div>
         <p class="muted" style="margin:0;font-size:13px">Si l'autre parent a déjà inscrit l'enfant, écris exactement le même prénom, nom et date de naissance : vous serez reliés au même enfant, avec les mêmes droits.</p>
         ${(S.suKids || [{}]).map((k, i) => `<div class="card stack" style="gap:8px;padding:10px 12px" data-kid="${i}">
           <div class="row" style="justify-content:space-between"><b style="font-size:14px">Enfant ${i + 1}</b>${i > 0 ? `<button type="button" class="link" data-delkid="${i}">Retirer</button>` : ""}</div>
           <div class="grid2"><label class="field">Prénom<input name="kFirst" value="${esc(k.first || "")}" required></label><label class="field">Nom<input name="kLast" value="${esc(k.last || "")}" required></label></div>
-          <div class="grid2"><label class="field">Date de naissance<input name="kBirth" type="date" value="${esc(k.birth || "")}" required></label><label class="field">Équipe<select name="kTeam" required><option value="">Choisir…</option>${teamOptions(k.team)}</select></label></div></div>`).join("")}
-        <button type="button" class="btn ghost small" data-addkid style="align-self:flex-start">＋ Ajouter un autre enfant</button></div>` : ""}
+          <div class="grid2"><label class="field">Date de naissance<input name="kBirth" type="date" value="${esc(k.birth || "")}" required></label><label class="field">Équipe<select name="kTeam" required><option value="">Choisir…</option>${teamOptions(k.team)}</select></label></div>
+          <label class="field">C'est<select name="kGender" required><option value="">Choisir…</option><option value="F" ${k.gender === "F" ? "selected" : ""}>Une fille</option><option value="H" ${k.gender === "H" ? "selected" : ""}>Un garçon</option></select></label></div>`).join("")}
+        <button type="button" class="btn ghost small" data-addkid style="align-self:flex-start">＋ Ajouter un autre enfant</button>
+        <label class="check card" style="padding:10px 12px"><input type="checkbox" id="suLegal" ${S.suLegal ? "checked" : ""}><span><b>Je suis responsable légal</b> de ces enfants</span></label></div>` : ""}
+      ${S.suKind === "parent" || S.suKind === "athlete" ? `<div class="stack" style="gap:8px"><div class="eyebrow">Personne à contacter en cas de problème</div>
+        <p class="muted" style="margin:0;font-size:13px">${S.suKind === "parent" ? "Une autre personne que toi (grand-parent, autre parent…), si on n'arrive pas à te joindre." : "Un parent ou un proche à prévenir en cas d'accident."}</p>
+        <div class="grid2"><label class="field">Nom<input id="suEmName" required></label><label class="field">Téléphone<input id="suEmPhone" type="tel" required></label></div></div>` : ""}
       <label class="field">E-mail<input id="suEmail" type="email" autocomplete="email" required></label>
       <label class="field">Mot de passe (8 caractères minimum)<input id="suPass" type="password" autocomplete="new-password" minlength="8" required></label>
       <div class="err" id="authErr" hidden></div>
@@ -381,13 +389,18 @@ function bindAuth() {
   const su = document.getElementById("signup");
   if (su && !S.signupTeams) sb.from("teams").select("id,name").order("position").then(({ data }) => { if (data && data.length) { S.signupTeams = data.map(t => [t.id, t.name]); } });
   $app.querySelectorAll("[name=suKind]").forEach(r => r.onchange = () => { keepSignup(); S.suKind = r.value; render(); });
-  const keepSignup = () => { const k = readKids(); S.suKids = k.length ? k : (S.suKids || [{}]); S.suVals = Object.fromEntries(["suFirst", "suLast", "suEmail", "suBirth", "suTeam"].map(id => [id, (document.getElementById(id) || {}).value || ""])); };
+  const keepSignup = () => { const k = readKids(); S.suKids = k.length ? k : (S.suKids || [{}]); const gg = $app.querySelector("[name=suGender]:checked"); if (gg) S.suGender = gg.value; const lg = document.getElementById("suLegal"); if (lg) S.suLegal = lg.checked;
+    S.suVals = Object.fromEntries(["suFirst", "suLast", "suEmail", "suBirth", "suTeam", "suPhone", "suEmName", "suEmPhone"].map(id => [id, (document.getElementById(id) || {}).value || ""])); };
   if (su && S.suVals) { for (const [id, v] of Object.entries(S.suVals)) { const el = document.getElementById(id); if (el && v) el.value = v; } }
   const ak = $app.querySelector("[data-addkid]"); if (ak) ak.onclick = () => { keepSignup(); S.suKids.push({ last: (S.suKids[0] || {}).last || "" }); render(); };
   $app.querySelectorAll("[data-delkid]").forEach(b => b.onclick = () => { keepSignup(); S.suKids.splice(+b.dataset.delkid, 1); render(); });
   if (su) su.onsubmit = async ev => { ev.preventDefault();
     if (!S.suKind) return authErr("Indique si tu es parent, athlète, coach ou membre du bureau.");
-    const meta = { full_name: (val("suFirst") + " " + val("suLast")).trim(), kind: S.suKind === "other" ? "" : S.suKind };
+    const gs = $app.querySelector("[name=suGender]:checked");
+    if (!gs) return authErr("Indique si tu es une femme ou un homme.");
+    const meta = { full_name: (val("suFirst") + " " + val("suLast")).trim(), kind: S.suKind === "other" ? "" : S.suKind, gender: gs.value, phone: val("suPhone") };
+    if (document.getElementById("suEmName")) { meta.emergency_name = val("suEmName"); meta.emergency_phone = val("suEmPhone"); }
+    if (document.getElementById("suLegal")) meta.legal = document.getElementById("suLegal").checked;
     if (S.suKind === "athlete") { meta.birth_date = val("suBirth"); meta.team = val("suTeam"); }
     if (S.suKind === "parent") meta.children = readKids().filter(k => k.first && k.last);
     busy(su, true);
@@ -395,7 +408,7 @@ function bindAuth() {
       options: { data: meta, emailRedirectTo: location.origin + location.pathname } });
     busy(su, false);
     if (error) return authErr(frError(error));
-    S.suKids = null; S.suVals = null;
+    S.suKids = null; S.suVals = null; S.suGender = null; S.suLegal = false;
     if (!data.session) { S.auth = "login"; render(); toast("Compte créé : clique sur le lien reçu par e-mail pour l'activer."); } };
   const fg = document.getElementById("forgot");
   if (fg) fg.onsubmit = async ev => { ev.preventDefault(); busy(fg, true);
@@ -429,7 +442,22 @@ window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); instal
 function accountView() {
   return `<div class="card stack"><div class="row"><span class="av" style="width:48px;height:48px;font-size:16px">${initials(me.full_name)}</span><span><b style="font-size:17px">${esc(me.full_name)}</b><br><span class="muted">${esc(roleLabel(me))}</span></span></div>
       <span class="muted" style="font-size:13.5px">${esc(myEmail)}</span></div>
-    <form id="nameForm" class="card stack"><h2>Mon nom</h2><label class="field">Prénom et nom<input id="accName" value="${esc(me.full_name)}" required></label><button class="btn small" style="align-self:flex-start">Enregistrer</button></form>
+    <form id="nameForm" class="card stack"><h2>Mes informations</h2>
+      <label class="field">Prénom et nom<input id="accName" value="${esc(me.full_name)}" required></label>
+      <div class="field">Tu es${genderPick("accGender", PV(me.id).gender)}</div>
+      <label class="field">Téléphone<input id="accPhone" type="tel" value="${esc(PV(me.id).phone || "")}" placeholder="06 12 34 56 78"></label>
+      ${me.role === "athlete" ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
+        <div class="grid2"><label class="field">Nom<input id="accEmName" value="${esc(PV(me.id).emergency_name || "")}"></label><label class="field">Téléphone<input id="accEmPhone" type="tel" value="${esc(PV(me.id).emergency_phone || "")}"></label></div>` : ""}
+      <button class="btn small" style="align-self:flex-start">Enregistrer</button></form>
+    ${me.role === "parent" ? childrenOf(me.id).map(c => `<form class="card stack" data-kidform="${c.id}"><h2>${esc(c.full_name)}</h2>
+      <span class="muted" style="font-size:13px">${c.team_id ? esc(T(c.team_id).name) : "Sans équipe"}${c.birth_date ? " · né·e le " + fmtDate(c.birth_date + "T12:00:00") : ""}</span>
+      <div class="field">C'est${genderPick("kg-" + c.id, PV(c.id).gender, true)}</div>
+      ${c.managed ? "" : `<label class="field">Téléphone de ${esc(first(c.full_name))}<input name="kPhone" type="tel" value="${esc(PV(c.id).phone || "")}"></label>`}
+      <label class="check"><input type="checkbox" name="kLegal" ${isLegal(me.id, c.id) ? "checked" : ""}><span>Je suis <b>responsable légal</b> de ${esc(first(c.full_name))}</span></label>
+      <div class="eyebrow">Personne à contacter en cas de problème</div>
+      <div class="grid2"><label class="field">Nom<input name="kEmName" value="${esc(PV(c.id).emergency_name || "")}"></label><label class="field">Téléphone<input name="kEmPhone" type="tel" value="${esc(PV(c.id).emergency_phone || "")}"></label></div>
+      <span class="muted" style="font-size:12.5px">Autre(s) parent(s) : ${parentsOf(c.id).filter(x => x.id !== me.id).map(x => esc(x.full_name) + (isLegal(x.id, c.id) ? " (responsable légal)" : "")).join(", ") || "aucun dans l'app"}</span>
+      <button class="btn small" style="align-self:flex-start">Enregistrer</button></form>`).join("") : ""}
     <form id="passForm" class="card stack"><h2>Changer de mot de passe</h2><label class="field">Nouveau mot de passe<input id="accPass" type="password" minlength="8" autocomplete="new-password" required></label><button class="btn small" style="align-self:flex-start">Changer</button></form>
     ${installCard()}
     <button class="btn ghost" id="logout">Se déconnecter</button>`;
@@ -445,6 +473,7 @@ function homeView() {
   const news = [...(D.news || [])].sort((a, b) => (b.pinned - a.pinned) || b.created_at.localeCompare(a.created_at));
   const tile = (attr, big, label, warn) => `<button class="card" ${attr} style="text-align:left;display:flex;flex-direction:column;gap:2px;${warn ? "border-color:var(--gold)" : ""}"><span style="font-family:var(--display);font-size:24px;font-weight:800;line-height:1">${big}</span><span class="muted" style="font-size:13px">${label}</span></button>`;
   return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:64px;border-radius:12px"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
+    ${!PV(me.id).gender || !PV(me.id).phone || (me.role === "parent" && childrenOf(me.id).some(c => !PV(c.id).gender || !PV(c.id).emergency_phone)) ? `<button class="card" data-tab="account" style="text-align:left;border-color:var(--gold);display:flex;flex-direction:column;gap:4px"><b>Complète ta fiche</b><span class="muted" style="font-size:13px">Indique ${me.role === "parent" ? "ton téléphone, le sexe de chaque enfant, le responsable légal et la personne à contacter en cas de problème" : "si tu es une femme ou un homme et ton téléphone"}.</span><span style="font-weight:700;color:var(--accent)">Compléter ›</span></button>` : ""}
     <div class="grid2">
       ${tile('data-tab="chats"', un, un > 1 ? "messages non lus" : "message non lu", un > 0)}
       ${isBureau() ? tile('data-tab="bureau"', pending, "compte" + (pending > 1 ? "s" : "") + " à valider · Espace bureau", pending > 0)
@@ -536,6 +565,26 @@ function eventCard(e) {
     </div></div>`;
 }
 
+/* Coordonnées (fiche privée) */
+const PV = id => (D && D.priv[id]) || {};
+const GENDERS = [["F", "Femme"], ["H", "Homme"]];
+const genderLabel = (g, kid) => g === "F" ? (kid ? "Fille" : "Femme") : g === "H" ? (kid ? "Garçon" : "Homme") : "";
+const tel = p => p ? `<a href="tel:${esc(p.replace(/[^\d+]/g, ""))}">${esc(p)}</a>` : '<span class="muted">non renseigné</span>';
+const isLegal = (pid, aid) => !!(D.links.find(l => l.parent_id === pid && l.athlete_id === aid) || {}).legal;
+function genderPick(name, val, kid) { return `<div class="chips">${GENDERS.map(([v]) => `<label class="chip"><input type="radio" name="${name}" value="${v}" ${val === v ? "checked" : ""}> ${genderLabel(v, kid)}</label>`).join("")}</div>`; }
+// Bloc « contacts » d'un athlète : ses parents, le responsable légal, la personne à prévenir
+function contactsOf(a) {
+  const pv = PV(a.id), par = parentsOf(a.id);
+  return `<div class="stack" style="gap:4px;font-size:13.5px">
+    ${a.managed ? "" : `<div>📞 ${esc(first(a.full_name))} : ${tel(PV(a.id).phone)}</div>`}
+    ${par.map(x => `<div>👤 ${esc(x.full_name)}${isLegal(x.id, a.id) ? ' <span class="tag ok">Responsable légal</span>' : ""} : ${tel(PV(x.id).phone)}</div>`).join("") || '<div class="muted">Aucun parent relié</div>'}
+    <div>🚨 En cas de problème : ${pv.emergency_name ? esc(pv.emergency_name) + " · " + tel(pv.emergency_phone) : '<span class="muted">non renseigné</span>'}</div></div>`;
+}
+async function savePriv(id, patch) {
+  const [row] = await q(sb.from("profile_private").upsert({ id, ...patch }).select());
+  D.priv[id] = row || { ...PV(id), ...patch };
+}
+
 /* Série d'entraînements : même titre, mêmes équipes, même jour de la semaine et même heure, à partir de cette date */
 function seriesOf(e) {
   if (!e || e.type !== "train") return e ? [e] : [];
@@ -588,7 +637,8 @@ function rollView(id) {
     <p class="muted" style="margin:6px 0 0;font-size:12.5px">Tout le monde est compté présent, sauf si l'athlète ou un parent a déclaré une absence.</p></div>
     ${[...new Set(roll.map(a => a.team_id))].map(t => `<div class="daylabel">Équipe ${esc(T(t).name)}</div><div class="list">${roll.filter(a => a.team_id === t).sort((a, b) => isAbsent(e.id, b.id) - isAbsent(e.id, a.id)).map(a => { const at = attOf(e.id, a.id), st = at ? at.status : "present";
       return `<div class="item" style="align-items:flex-start"><span class="av" style="width:36px;height:36px">${initials(a.full_name)}</span><span class="txt"><span class="t1">${esc(a.full_name)}</span>
-        ${st === "absent" ? `<span class="t2" style="white-space:normal">${esc(at.reason || "Pas de motif")}</span>${at.file_path ? `<button class="link" style="font-size:13px;padding:0;display:block" data-open="${esc(at.file_path)}">📎 Voir le justificatif</button>` : ""}` : ""}</span>
+        ${st === "absent" ? `<span class="t2" style="white-space:normal">${esc(at.reason || "Pas de motif")}</span>${at.file_path ? `<button class="link" style="font-size:13px;padding:0;display:block" data-open="${esc(at.file_path)}">📎 Voir le justificatif</button>` : ""}` : ""}
+        <details style="margin-top:4px"><summary class="muted" style="font-size:13px;cursor:pointer">Contacts</summary>${contactsOf(a)}</details></span>
         ${st === "absent" ? '<span class="tag comp">Absent·e</span>' : '<span class="tag ok">Présent·e</span>'}</div>`; }).join("")}</div>`).join("") || `<div class="empty">Aucun athlète dans ces équipes.</div>`}`;
 }
 async function saveAtt(eid, aid, patch) {
@@ -918,13 +968,18 @@ function memberView(id) {
     ${p.managed ? `<div class="notice">${I.user}<span>Enfant <b>sans compte</b> : ses parents indiquent ses absences et envoient ses documents. Parents : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun"}.</span></div>` : ""}
     ${p.role === "pending" && p.wish ? `<p class="muted" style="margin:0;font-size:13px">À l'inscription, cette personne s'est déclarée <b>${p.wish === "parent" ? "parent" : "athlète"}</b>. Vérifie les informations puis enregistre.</p>` : ""}
     <label class="field">Prénom et nom<input id="mName" value="${esc(p.full_name)}" required></label>
+    <div class="field">Sexe${genderPick("mGender", PV(id).gender, p.managed)}</div>
+    ${p.managed ? "" : `<label class="field">Téléphone<input id="mPhone" type="tel" value="${esc(PV(id).phone || "")}"></label>`}
+    ${role === "athlete" ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
+      <div class="grid2"><label class="field">Nom<input id="mEmName" value="${esc(PV(id).emergency_name || "")}"></label><label class="field">Téléphone<input id="mEmPhone" type="tel" value="${esc(PV(id).emergency_phone || "")}"></label></div>
+      <div class="card stack" style="gap:6px"><b style="font-size:14px">Contacts</b>${contactsOf(p)}</div>` : ""}
     <label class="field">Rôle<select id="mRole">
       ${[["pending", "En attente (aucun accès)"], ["athlete", "Athlète"], ["parent", "Parent"], ["coach", "Coach"], ["bureau", "Membre du bureau"]].map(([v, l]) => `<option value="${v}" ${role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     ${role === "athlete" ? `<label class="field">Date de naissance<input id="mBirth" type="date" value="${esc(p.birth_date || "")}"></label>` : ""}
     ${role === "athlete" ? `<label class="field">Équipe<select id="mTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
     ${role === "coach" ? `<div class="field">Équipes entraînées<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="mct" value="${t.id}" ${coachTeamsOf(id).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div><span class="muted" style="font-size:13px;font-weight:400">Le coach voit le planning, le tchat et l'appel de ces équipes.</span></div>` : ""}
     ${role === "bureau" ? `<label class="field">Fonction<input id="mTitle" value="${esc(p.title || "")}" placeholder="Président, trésorière, coach…"></label>` : ""}
-    ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${kidList.map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)}${a.birth_date ? ` <span class="muted" style="font-size:12.5px">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""} ${a.team_id ? teamChip(a.team_id) : '<span class="tag warn">Sans équipe</span>'}${a.role === "pending" ? ' <span class="tag warn">nouveau</span>' : ""}${parentsOf(a.id).filter(x => x.id !== id).length ? ` <span class="muted" style="font-size:12.5px">· autre parent : ${parentsOf(a.id).filter(x => x.id !== id).map(x => esc(first(x.full_name))).join(", ")}</span>` : ""}</span></label>`).join("") || '<span class="muted">Aucun enfant pour l\'instant : ajoute-le ci-dessous.</span>'}</div>
+    ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${kidList.map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)}${a.birth_date ? ` <span class="muted" style="font-size:12.5px">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""} ${a.team_id ? teamChip(a.team_id) : '<span class="tag warn">Sans équipe</span>'}${a.role === "pending" ? ' <span class="tag warn">nouveau</span>' : ""}${isLegal(id, a.id) ? ' <span class="tag ok">responsable légal</span>' : ""}${parentsOf(a.id).filter(x => x.id !== id).length ? ` <span class="muted" style="font-size:12.5px">· autre parent : ${parentsOf(a.id).filter(x => x.id !== id).map(x => esc(first(x.full_name))).join(", ")}</span>` : ""}</span></label>`).join("") || '<span class="muted">Aucun enfant pour l\'instant : ajoute-le ci-dessous.</span>'}</div>
       <span class="muted" style="font-size:12.5px;font-weight:400">Les enfants cochés et « nouveaux » sont validés en même temps que le parent.</span></div>
       <details class="card"><summary style="font-weight:700;cursor:pointer">＋ Ajouter un enfant</summary><div class="stack" style="margin-top:10px">
         <div class="grid2"><label class="field">Prénom<input id="akFirst"></label><label class="field">Nom<input id="akLast" value="${esc((p.full_name || "").trim().split(/\s+/).slice(1).join(" "))}"></label></div>
@@ -1191,11 +1246,16 @@ function bind() {
     if (role === "athlete" && !upd.team_id) return toast("Choisis l'équipe de l'athlète.");
     const [row] = await q(sb.from("profiles").update(upd).eq("id", id).select("*"));
     D.P[id] = row;
+    const mg = $app.querySelector("[name=mGender]:checked"), pp = { gender: mg ? mg.value : null };
+    if (document.getElementById("mPhone")) pp.phone = val("mPhone");
+    if (document.getElementById("mEmName")) { pp.emergency_name = val("mEmName"); pp.emergency_phone = val("mEmPhone"); }
+    await savePriv(id, pp).catch(e => console.error(e));
     if (role === "parent") {
       const kids = [...f.querySelectorAll("[name=mkid]:checked")].map(x => x.value);
+      const old = D.links.filter(l => l.parent_id === id), rows = kids.map(a => ({ parent_id: id, athlete_id: a, ...((old.find(l => l.athlete_id === a) || {}).legal ? { legal: true } : {}) }));
       await q(sb.from("parent_links").delete().eq("parent_id", id).select());
-      if (kids.length) await q(sb.from("parent_links").insert(kids.map(a => ({ parent_id: id, athlete_id: a }))).select());
-      D.links = D.links.filter(l => l.parent_id !== id).concat(kids.map(a => ({ parent_id: id, athlete_id: a })));
+      if (rows.length) for (const r of rows) await q(sb.from("parent_links").insert(r).select());
+      D.links = D.links.filter(l => l.parent_id !== id).concat(rows);
       // Les enfants déclarés à l'inscription sont validés avec leur parent
       const news = kids.filter(a => P(a).role === "pending");
       if (news.length) for (const r of await q(sb.from("profiles").update({ role: "athlete" }).in("id", news).select("*"))) D.P[r.id] = r;
@@ -1211,8 +1271,19 @@ function bind() {
 
   form("nameForm", async () => {
     const [row] = await q(sb.from("profiles").update({ full_name: val("accName") }).eq("id", me.id).select("*"));
-    me = Object.assign(me, row); D.P[me.id] = me; render(0); toast("Nom enregistré");
+    me = Object.assign(me, row); D.P[me.id] = me;
+    const g = $app.querySelector("[name=accGender]:checked"), patch = { gender: g ? g.value : null, phone: val("accPhone") };
+    if (document.getElementById("accEmName")) { patch.emergency_name = val("accEmName"); patch.emergency_phone = val("accEmPhone"); }
+    await savePriv(me.id, patch); render(0); toast("Informations enregistrées");
   });
+  $app.querySelectorAll("[data-kidform]").forEach(f => f.onsubmit = async ev => { ev.preventDefault();
+    const id = f.dataset.kidform, g = f.querySelector(`[name="kg-${id}"]:checked`), v = n => (f.querySelector(`[name=${n}]`) || {}).value;
+    try { const patch = { gender: g ? g.value : null, emergency_name: v("kEmName").trim(), emergency_phone: v("kEmPhone").trim() };
+      if (f.querySelector("[name=kPhone]")) patch.phone = v("kPhone").trim();
+      await savePriv(id, patch);
+      const legal = f.querySelector("[name=kLegal]").checked;
+      if (legal !== isLegal(me.id, id)) { await q(sb.rpc("set_legal_guardian", { a: id, v: legal })); const l = D.links.find(x => x.parent_id === me.id && x.athlete_id === id); if (l) l.legal = legal; }
+      render(0); toast("Fiche enregistrée"); } catch (e) { fail(e); } });
   form("passForm", async () => {
     const { error } = await sb.auth.updateUser({ password: document.getElementById("accPass").value });
     if (error) return toast(frError(error)); document.getElementById("accPass").value = ""; toast("Mot de passe changé");
