@@ -1103,7 +1103,7 @@ function bind() {
       const [tr] = await q(sb.from("trips").insert({ event_id: evs[0].id, transport: val("trTransport") || mode, depart_place: val("trPlace"), depart_date: dDate, depart_time: val("trTime") || null, return_date: rDate, return_time: val("trRet"), lodging: val("trLodging"), contact: val("trContact") }).select());
       await q(sb.from("trip_items").insert(DEFAULT_ITEMS.map((label, position) => ({ trip_id: tr.id, label, position }))).select());
       await q(sb.from("trip_legs").insert([
-        { trip_id: tr.id, kind: "aller", mode, day: dDate, time: val("trTime") || null, from_place: val("trPlace"), to_place: val("evPlace") },
+        { trip_id: tr.id, kind: "aller", mode, day: dDate, time: val("trTime") || null, from_place: val("trPlace"), to_place: val("evPlace"), details: "" },
         { trip_id: tr.id, kind: "retour", mode, day: rDate, from_place: val("evPlace"), to_place: val("trPlace"), details: val("trRet") ? "Arrivée prévue " + val("trRet") : "" }]).select());
       if (val("trTime")) await q(sb.from("trip_steps").insert({ trip_id: tr.id, day: dDate, time: val("trTime"), label: "Départ" }).select());
     }
