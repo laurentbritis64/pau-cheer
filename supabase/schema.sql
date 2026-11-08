@@ -368,15 +368,11 @@ declare
 begin
   if exists(select 1 from events where type = 'train') then return; end if;
   for r in select * from (values
-      ('lionceaux',2,'17:45'::time,'19:00'::time),
-      ('tigrous',  6,'10:00','12:00'),
-      ('tigroux',  6,'10:00','12:00'),
-      ('servals',  2,'17:45','19:15'),
-      ('servals',  5,'17:45','19:15'),
-      ('cougars',  4,'19:00','21:00'),
-      ('panthers', 3,'19:00','21:30'),
-      ('panthers', 5,'19:15','21:15'),
-      ('pom',      1,'18:00','20:00')
+      ('tigrous',  6,'10:00'::time,'12:00'::time),
+      ('tigroux',  3,'17:30','19:30'),
+      ('servals',  2,'17:45','20:00'),
+      ('servals',  5,'17:45','19:30'),
+      ('cougars',  4,'19:00','21:00')
     ) as t(team, dow, s, e)
   loop
     for d in select g::date from generate_series(current_date, date '2027-06-30', interval '1 day') g
