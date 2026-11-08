@@ -39,11 +39,16 @@ const store = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; } catch (e) { return d; } },
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch (e) {} },
 };
-function toast(msg) {
+function toast(msg, ms = 2600) {
   const t = document.getElementById("toast"); t.textContent = msg; t.hidden = false;
-  clearTimeout(toast.h); toast.h = setTimeout(() => t.hidden = true, 2600);
+  clearTimeout(toast.h); toast.h = setTimeout(() => t.hidden = true, ms);
 }
-function fail(e, msg) { console.error(e); toast(msg || "Une erreur est survenue. Vérifie ta connexion et réessaie."); }
+function fail(e, msg) {
+  console.error(e);
+  // Le détail technique aide à comprendre le problème (à copier au responsable de l'app)
+  const d = e && (e.message || e.details || e.hint || e.code) ? String(e.message || e.details || e.hint || e.code).slice(0, 160) : "";
+  toast((msg || "Une erreur est survenue. Vérifie ta connexion et réessaie.") + (d ? " Détail : " + d : ""), d ? 9000 : 2600);
+}
 
 const I = {
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
@@ -1087,8 +1092,12 @@ function bind() {
     let dates = [val("evDate")];
     const rep = document.getElementById("evRepeat");
     if (type === "train" && rep && rep.checked) { const until = val("evUntil"); dates = []; for (let d = val("evDate"); d <= until && dates.length < 60; d = addDays(d, 7)) dates.push(d); }
+    let step = "création de l'événement";
+    try {
     const evs = await q(sb.from("events").insert(dates.map(date => ({ ...base, date }))).select());
+    step = "choix des équipes";
     await q(sb.from("event_teams").insert(evs.flatMap(e => tms.map(team_id => ({ event_id: e.id, team_id })))).select());
+    step = "création du déplacement";
     if (type === "comp") {
       const dDate = val("trDate") || evs[0].date, rDate = val("trRDate") >= dDate ? val("trRDate") : dDate, mode = val("trMode");
       const [tr] = await q(sb.from("trips").insert({ event_id: evs[0].id, transport: val("trTransport") || mode, depart_place: val("trPlace"), depart_date: dDate, depart_time: val("trTime") || null, return_date: rDate, return_time: val("trRet"), lodging: val("trLodging"), contact: val("trContact") }).select());
@@ -1098,7 +1107,9 @@ function bind() {
         { trip_id: tr.id, kind: "retour", mode, day: rDate, from_place: val("evPlace"), to_place: val("trPlace"), details: val("trRet") ? "Arrivée prévue " + val("trRet") : "" }]).select());
       if (val("trTime")) await q(sb.from("trip_steps").insert({ trip_id: tr.id, day: dDate, time: val("trTime"), label: "Départ" }).select());
     }
-    await loadAll(); S.filter = "all"; S.tab = null; go("planning"); toast(dates.length > 1 ? `${dates.length} entraînements ajoutés` : "Ajouté au planning");
+    } catch (e) { return fail(e, `Ça n'a pas marché (étape : ${step}).`); }
+    try { await loadAll(); } catch (e) { return fail(e, "L'événement est bien ajouté, mais le planning n'a pas pu se recharger."); }
+    S.filter = "all"; S.tab = null; go("planning"); toast(dates.length > 1 ? `${dates.length} entraînements ajoutés` : "Ajouté au planning");
   });
 
   form("newsForm", async () => {
