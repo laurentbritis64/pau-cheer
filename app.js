@@ -333,7 +333,7 @@ function authView() {
           <div class="grid2"><label class="field">Prénom<input name="kFirst" value="${esc(k.first || "")}" required></label><label class="field">Nom<input name="kLast" value="${esc(k.last || "")}" required></label></div>
           <div class="grid2"><label class="field">Date de naissance<input name="kBirth" type="date" value="${esc(k.birth || "")}" required></label><label class="field">Équipe<select name="kTeam" required><option value="">Choisir…</option>${teamOptions(k.team)}</select></label></div>
           <label class="field">Publication de son image (réseaux, site, presse)<select name="kConsent" required><option value="">Choisir…</option><option value="true" ${k.consent === "true" ? "selected" : ""}>J'accepte</option><option value="false" ${k.consent === "false" ? "selected" : ""}>Je refuse</option></select></label>
-          <label class="field">Sexe<select name="kGender" required><option value="">…</option><option value="F" ${k.gender === "F" ? "selected" : ""}>👧 Fille</option><option value="H" ${k.gender === "H" ? "selected" : ""}>👦 Garçon</option></select></label></div>`).join("")}
+          <label class="field">Sexe<select name="kGender" required><option value="">…</option><option value="F" ${k.gender === "F" ? "selected" : ""}>👧 Fille</option><option value="H" ${k.gender === "H" ? "selected" : ""}>👦 Garçon</option><option value="N" ${k.gender === "N" ? "selected" : ""}>🧒 Sans genre</option></select></label></div>`).join("")}
         <button type="button" class="btn ghost small" data-addkid style="align-self:flex-start">＋ Ajouter un autre enfant</button>
         <label class="check card" style="padding:10px 12px"><input type="checkbox" id="suLegal" ${S.suLegal ? "checked" : ""}><span><b>Je suis responsable légal</b> de ces enfants</span></label></div>` : ""}
       ${S.suKind === "parent" || S.suKind === "athlete" ? `<div class="stack" style="gap:8px"><div class="eyebrow">Personne à contacter en cas de problème</div>
@@ -599,8 +599,8 @@ const consentVal = (root, name) => { const r = root.querySelector(`[name="${name
 
 /* Coordonnées (fiche privée) */
 const PV = id => (D && D.priv[id]) || {};
-const GENDERS = [["F", "Femme"], ["H", "Homme"]];
-const genderLabel = (g, kid) => g === "F" ? (kid ? "Fille" : "Femme") : g === "H" ? (kid ? "Garçon" : "Homme") : "";
+const GENDERS = [["F", "Femme"], ["H", "Homme"], ["N", "Sans genre"]];
+const genderLabel = (g, kid) => g === "F" ? (kid ? "Fille" : "Femme") : g === "H" ? (kid ? "Garçon" : "Homme") : g === "N" ? "Sans genre" : "";
 const genderSign = g => g === "F" ? "♀" : g === "H" ? "♂" : "";
 // Deux cases Prénom / Nom (le nom complet reste enregistré en un seul champ)
 const splitName = n => { const w = (n || "").trim().split(/\s+/); return [w[0] || "", w.slice(1).join(" ")]; };
@@ -612,8 +612,9 @@ const isLegal = (pid, aid) => !!(D.links.find(l => l.parent_id === pid && l.athl
 const GICON = {
   F: '<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="5" r="3.2" fill="#e0559a"/><path d="M12 9.2c-2.2 0-3.4 1.2-3.9 3.1L6.6 18h3l-.1 4h5l-.1-4h3l-1.5-5.7c-.5-1.9-1.7-3.1-3.9-3.1z" fill="#e0559a"/></svg>',
   H: '<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="5" r="3.2" fill="#2f7fd8"/><path d="M8.6 9.4h6.8c1.3 0 2.1.9 2.1 2.1V16h-2v6h-3v-5h-1v5h-3v-6h-2v-4.5c0-1.2.8-2.1 2.1-2.1z" fill="#2f7fd8"/></svg>',
+  N: '<svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><circle cx="12" cy="5" r="3.2" fill="#8b5cf6"/><path d="M12 9.2c-2.6 0-4 1.3-4 3.4V16h2v6h4v-6h2v-3.4c0-2.1-1.4-3.4-4-3.4z" fill="#8b5cf6"/></svg>',
 };
-function genderPick(name, val, kid) { return `<div class="chips gpick">${GENDERS.map(([v]) => `<label class="chip g-${v}" title="${genderLabel(v, kid)}"><input type="radio" name="${name}" value="${v}" ${val === v ? "checked" : ""} aria-label="${genderLabel(v, kid)}">${GICON[v]}<span>${genderLabel(v, kid)}</span></label>`).join("")}</div>`; }
+function genderPick(name, val, kid) { return `<div class="chips gpick">${GENDERS.map(([v]) => `<label class="chip g-${v}" title="${genderLabel(v, kid)}"><input type="radio" name="${name}" value="${v}" ${val === v ? "checked" : ""} aria-label="${genderLabel(v, kid)}">${GICON[v]}</label>`).join("")}</div>`; }
 // Bloc « contacts » d'un athlète : ses parents, le responsable légal, la personne à prévenir
 function contactsOf(a) {
   const pv = PV(a.id), par = parentsOf(a.id);
