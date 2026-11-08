@@ -514,6 +514,11 @@ function planningView() {
       ${byDay[d].map(eventCard).join("")}</div>`).join("") || `<div class="empty">Rien de prévu pour le moment.</div>`}
     ${evs.length > shown.length ? `<button class="btn ghost" data-more>Voir la suite du planning</button>` : ""}`;
 }
+function delChoice(e) {
+  const n = seriesOf(e).length;
+  return n > 1 ? `<span class="muted" style="font-size:13px;width:100%">Supprimer :</span><button class="btn small danger" data-delev="${e.id}">Cet entraînement</button><button class="btn small danger" data-delseries="${e.id}">Celui-ci et les suivants (${n})</button><button class="btn small ghost" data-cancel>Annuler</button>`
+    : `<button class="btn small danger" data-delev="${e.id}">Confirmer la suppression</button><button class="btn small ghost" data-cancel>Annuler</button>`;
+}
 function eventCard(e) {
   const teams = planTeams(), tr = e._trip || tripOfEvent(e.id), dep = e.type === "depart";
   const kids = me.role === "parent" ? e.teams.flatMap(childrenIn).map(c => first(c.full_name)) : [];
@@ -526,10 +531,19 @@ function eventCard(e) {
       <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:2px">
         ${tr ? `<button class="btn small" data-trip="${tr.id}">Voir le déplacement</button>` : ""}
         ${canPlan() && !dep ? `<button class="btn small ghost" data-editev="${e.id}">Modifier</button>` : ""}
-        ${canPlan() && !dep ? (S.confirm === e.id ? `<button class="btn small danger" data-delev="${e.id}">Confirmer la suppression</button><button class="btn small ghost" data-cancel>Annuler</button>` : `<button class="btn small ghost" data-askdel="${e.id}">Supprimer</button>`) : ""}
+        ${canPlan() && !dep ? (S.confirm === e.id ? delChoice(e) : `<button class="btn small ghost" data-askdel="${e.id}">Supprimer</button>`) : ""}
       </div>
     </div></div>`;
 }
+
+/* Série d'entraînements : même titre, mêmes équipes, même jour de la semaine et même heure, à partir de cette date */
+function seriesOf(e) {
+  if (!e || e.type !== "train") return e ? [e] : [];
+  const key = x => [x.title, x.teams.join(","), new Date(x.date + "T12:00:00").getDay(), hm(x.start_time)].join("|"), k = key(e);
+  return D.events.filter(x => x.type === "train" && x.date >= e.date && key(x) === k);
+}
+const chunks = (a, n = 100) => Array.from({ length: Math.ceil(a.length / n) }, (_, i) => a.slice(i * n, i * n + n));
+const dayDiff = (a, b) => Math.round((new Date(b + "T12:00:00") - new Date(a + "T12:00:00")) / 864e5);
 
 /* ============ Présences aux entraînements ============ */
 function attOf(eid, aid) { return (D.attendance || []).find(a => a.event_id === eid && a.athlete_id === aid); }
@@ -936,6 +950,9 @@ function editEventView(id) {
     <label class="field">Date<input id="eeDate" type="date" value="${e.date}" required></label>
     <div class="grid2"><label class="field">Début<input id="eeS" type="time" value="${hm(e.start_time)}" required></label><label class="field">Fin<input id="eeE" type="time" value="${hm(e.end_time)}" required></label></div>
     <label class="field">Lieu<input id="eePlace" value="${esc(e.place)}" required></label>
+    ${seriesOf(e).length > 1 ? `<div class="field">Appliquer la modification à
+      <label class="check card" style="padding:10px 12px"><input type="radio" name="eeScope" value="one" checked><span>Cet entraînement seulement</span></label>
+      <label class="check card" style="padding:10px 12px"><input type="radio" name="eeScope" value="next"><span>Cet entraînement et les suivants (${seriesOf(e).length} au total)<br><span class="muted" style="font-size:13px;font-weight:400">Si tu changes la date, tous les suivants sont décalés du même nombre de jours.</span></span></label></div>` : ""}
     ${tr ? `<p class="muted" style="margin:0;font-size:13px">Le départ, les trajets et le programme se modifient dans la page du déplacement.</p><button type="button" class="btn ghost" data-trip="${tr.id}">Ouvrir le déplacement</button>` : ""}
     <button class="btn">Enregistrer les modifications</button></form>`;
 }
@@ -1016,6 +1033,11 @@ function bind() {
   on("[data-cancel]", () => { S.confirm = null; render(0); });
   on("[data-delev]", async b => { try { await q(sb.from("events").delete().eq("id", b.dataset.delev).select()); D.events = D.events.filter(e => e.id !== b.dataset.delev); S.confirm = null;
     if (S.view && S.view.kind === "trip") go("trips"); else render(0); toast("Supprimé du planning"); } catch (e) { fail(e); } });
+  on("[data-delseries]", async b => {
+    const e = D.events.find(x => x.id === b.dataset.delseries), ids = seriesOf(e).map(x => x.id);
+    try { for (const c of chunks(ids)) await q(sb.from("events").delete().in("id", c).select());
+      D.events = D.events.filter(x => !ids.includes(x.id)); S.confirm = null; render(0); toast(`${ids.length} entraînements supprimés`); } catch (e) { fail(e); }
+  });
   on("[data-open]", async b => { try { const u = await signedUrl(b.dataset.open); window.open(u, "_blank", "noopener"); } catch (e) { fail(e, "Impossible d'ouvrir ce fichier."); } });
   on("[data-packfor]", b => { S.packFor = b.dataset.packfor; render(0); });
   on("[data-docfor]", b => { S.docFor = b.dataset.docfor; render(); window.scrollTo(0, 0); });
@@ -1124,10 +1146,16 @@ function bind() {
   form("editev", async f => {
     const id = S.view.id, tms = [...f.querySelectorAll("[name=eetm]:checked")].map(x => x.value);
     if (!tms.length) return toast("Choisis au moins une équipe.");
-    await q(sb.from("events").update({ title: val("eeTitle"), date: val("eeDate"), start_time: val("eeS"), end_time: val("eeE"), place: val("eePlace") }).eq("id", id).select());
-    await q(sb.from("event_teams").delete().eq("event_id", id).select());
-    await q(sb.from("event_teams").insert(tms.map(team_id => ({ event_id: id, team_id }))).select());
-    await loadAll(); S.tab = null; go("planning"); toast("Événement modifié");
+    const e = D.events.find(x => x.id === id), sc = f.querySelector("[name=eeScope]:checked");
+    const list = sc && sc.value === "next" ? seriesOf(e) : [e], shift = dayDiff(e.date, val("eeDate"));
+    const base = { title: val("eeTitle"), start_time: val("eeS"), end_time: val("eeE"), place: val("eePlace") };
+    if (shift === 0) { for (const c of chunks(list.map(x => x.id))) await q(sb.from("events").update(base).in("id", c).select()); }
+    else for (const c of chunks(list, 10)) await Promise.all(c.map(x => q(sb.from("events").update({ ...base, date: addDays(x.date, shift) }).eq("id", x.id).select())));
+    if ([...tms].sort().join(",") !== [...e.teams].sort().join(",")) for (const c of chunks(list.map(x => x.id))) {
+      await q(sb.from("event_teams").delete().in("event_id", c).select());
+      await q(sb.from("event_teams").insert(c.flatMap(event_id => tms.map(team_id => ({ event_id, team_id })))).select());
+    }
+    await loadAll(); S.tab = null; go("planning"); toast(list.length > 1 ? `${list.length} entraînements modifiés` : "Événement modifié");
   });
   form("tripForm", async () => {
     const id = S.editTrip;
