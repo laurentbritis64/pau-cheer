@@ -1,5 +1,5 @@
 // Garde l'application en mémoire sur le téléphone pour qu'elle s'ouvre vite, même sans réseau.
-const VERSION = "pau-cheer-v12";
+const VERSION = "pau-cheer-v13";
 const SHELL = ["./", "index.html", "styles.css", "app.js", "config.js", "vendor/supabase.js", "manifest.webmanifest",
   "icons/logo.webp", "icons/icon-192.png", "icons/icon-512.png", "icons/apple-touch-icon.png"];
 

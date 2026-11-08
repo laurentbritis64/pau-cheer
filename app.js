@@ -80,19 +80,21 @@ const isBureau = () => me && me.role === "bureau";
 const canPlan = () => isBureau() || !!(me && me.can_plan && me.role !== "pending");
 const planTeams = () => canPlan() ? D.teams.map(t => t.id) : myTeams();
 
-function childrenOf(pid) { return D.links.filter(l => l.parent_id === pid).map(l => P(l.athlete_id)).filter(a => a.role === "athlete"); }
+// Athlète : rôle athlète, ou membre du bureau / coach qui pratique aussi dans une équipe
+const isAth = p => !!p && (p.role === "athlete" || ((p.role === "bureau" || p.role === "coach") && !!p.team_id));
+function childrenOf(pid) { return D.links.filter(l => l.parent_id === pid).map(l => P(l.athlete_id)).filter(isAth); }
 function parentsOf(aid) { return D.links.filter(l => l.athlete_id === aid).map(l => P(l.parent_id)); }
 function myTeams() {
   if (isBureau()) return D.teams.map(t => t.id);
   if (me.role === "athlete") return me.team_id ? [me.team_id] : [];
-  if (me.role === "coach") return coachTeamsOf(me.id);
+  if (me.role === "coach") return [...new Set([...coachTeamsOf(me.id), ...(me.team_id ? [me.team_id] : [])])].sort((a, b) => T(a).position - T(b).position);
   return [...new Set(childrenOf(me.id).map(c => c.team_id).filter(Boolean))].sort((a, b) => T(a).position - T(b).position);
 }
 function coachTeamsOf(id) { return (D.coachTeams || []).filter(c => c.coach_id === id).map(c => c.team_id).sort((a, b) => T(a).position - T(b).position); }
 // Mes propres équipes (la mienne, celles que j'entraîne, celles de mes enfants), pour le planning par défaut
 function ownTeams() {
   const s = new Set();
-  if (me.role === "athlete" && me.team_id) s.add(me.team_id);
+  if (isAth(me)) s.add(me.team_id);
   coachTeamsOf(me.id).forEach(t => s.add(t));
   childrenOf(me.id).forEach(c => c.team_id && s.add(c.team_id));
   return [...s].sort((a, b) => T(a).position - T(b).position);
@@ -100,13 +102,14 @@ function ownTeams() {
 // Équipes affichées par défaut : les miennes si j'en ai, sinon toutes celles que je vois
 function defaultTeams() { const all = planTeams(), own = ownTeams().filter(t => all.includes(t)); return own.length ? own : all; }
 const TEAM_LIST = [["lionceaux", "Lionceaux"], ["tigrous", "Tigrous"], ["tigroux", "Tigroux"], ["servals", "Servals"], ["cougars", "Cougars"], ["panthers", "Panthers"], ["pom", "Pom"]];
-function myAthletes() { return me.role === "athlete" ? [me] : me.role === "parent" ? childrenOf(me.id) : []; }
+function myAthletes() { return [...(isAth(me) ? [me] : []), ...childrenOf(me.id)]; }
 function childrenIn(team) { return me.role === "parent" ? childrenOf(me.id).filter(c => c.team_id === team) : []; }
-function athletes() { return Object.values(D.P).filter(p => p.role === "athlete").sort((a, b) => a.full_name.localeCompare(b.full_name)); }
+function athletes() { return Object.values(D.P).filter(isAth).sort((a, b) => a.full_name.localeCompare(b.full_name)); }
 function roleLabel(u) {
-  if (u.role === "bureau") return (u.title ? u.title + " · " : "") + "Bureau";
+  const ath = u.role !== "athlete" && isAth(u) ? " · athlète " + T(u.team_id).name : "";
+  if (u.role === "bureau") return (u.title ? u.title + " · " : "") + "Bureau" + ath;
   if (u.role === "athlete") return "Athlète" + (u.team_id ? " · " + T(u.team_id).name : "");
-  if (u.role === "coach") { const t = coachTeamsOf(u.id); return "Coach" + (t.length ? " · " + t.map(x => T(x).name).join(", ") : ""); }
+  if (u.role === "coach") { const t = coachTeamsOf(u.id); return "Coach" + (t.length ? " · " + t.map(x => T(x).name).join(", ") : "") + ath; }
   if (u.role === "parent") { const c = childrenOf(u.id); return c.length ? "Parent de " + c.map(x => first(x.full_name)).join(", ") : "Parent"; }
   return "En attente de validation";
 }
@@ -129,7 +132,8 @@ function dmPartners() {
     if (p.role === "bureau") return true;
     if (p.role === "coach") return coachTeamsOf(p.id).some(t => mine.includes(t));
     if (me.role === "coach") {
-      if (p.role === "athlete") return mine.includes(p.team_id);
+      if (isAth(p) && mine.includes(p.team_id)) return true;
+      if (p.role === "athlete") return false;
       if (p.role === "parent") return childrenOf(p.id).some(c => mine.includes(c.team_id));
     }
     return false;
@@ -289,7 +293,7 @@ function render(keepBottom) {
     <header class="top pad">
       ${back ? `<button class="back" id="back" aria-label="Retour">‹</button>` : `<img class="hlogo" src="icons/logo.webp" alt="">`}
       <h1>${esc(title)}</h1>
-      <button class="who" id="who" title="Mon compte"><span class="av">${initials(me.full_name)}</span>${esc(first(me.full_name) || "Mon compte")}</button>
+      <button class="who" id="who" title="Mon compte">${avatar(me, 26)}${esc(first(me.full_name) || "Mon compte")}</button>
     </header>
     <main class="pad">${body}</main>
     ${composer}
@@ -310,7 +314,7 @@ function render(keepBottom) {
 
 /* ============ Connexion ============ */
 function teamOptions(sel) { return (S.signupTeams || TEAM_LIST).map(([id, name]) => `<option value="${id}" ${sel === id ? "selected" : ""}>${esc(name)}</option>`).join(""); }
-function readKids() { return [...$app.querySelectorAll("[data-kid]")].map(c => ({ first: c.querySelector("[name=kFirst]").value.trim(), last: c.querySelector("[name=kLast]").value.trim(), birth: c.querySelector("[name=kBirth]").value, team: c.querySelector("[name=kTeam]").value, gender: c.querySelector("[name=kGender]").value })); }
+function readKids() { return [...$app.querySelectorAll("[data-kid]")].map(c => ({ first: c.querySelector("[name=kFirst]").value.trim(), last: c.querySelector("[name=kLast]").value.trim(), birth: c.querySelector("[name=kBirth]").value, team: c.querySelector("[name=kTeam]").value, gender: c.querySelector("[name=kGender]").value, consent: c.querySelector("[name=kConsent]").value })); }
 function authView() {
   const m = S.auth || "login";
   const head = `<div class="brand"><img src="icons/logo.webp" alt="Logo Pau Cheerleading"><div class="eyebrow">Application du club</div><div class="logo">Pau<br><span>Cheerleading</span></div></div>`;
@@ -318,8 +322,9 @@ function authView() {
     <form id="signup" class="authbox"><h2>Créer mon compte</h2>
       <div class="field">Je suis<div class="chips">${[["parent", "Parent"], ["athlete", "Athlète"], ["other", "Coach ou bureau"]].map(([v, l]) => `<label class="chip"><input type="radio" name="suKind" value="${v}" ${S.suKind === v ? "checked" : ""}> ${l}</label>`).join("")}</div></div>
       <div class="grid2"><label class="field">Prénom<input id="suFirst" autocomplete="given-name" required></label><label class="field">Nom<input id="suLast" autocomplete="family-name" required></label></div>
-      <div class="field">Tu es${genderPick("suGender", S.suGender)}</div>
+      <div class="field">Sexe${genderPick("suGender", S.suGender)}</div>
       <label class="field">Téléphone<input id="suPhone" type="tel" autocomplete="tel" placeholder="06 12 34 56 78" required></label>
+      ${consentPick("suConsent", S.suConsent, "de mon image")}
       ${S.suKind === "athlete" ? `<div class="grid2"><label class="field">Date de naissance<input id="suBirth" type="date" required></label><label class="field">Équipe<select id="suTeam" required><option value="">Choisir…</option>${teamOptions()}</select></label></div>` : ""}
       ${S.suKind === "parent" ? `<div class="stack" style="gap:8px"><div class="eyebrow">Mes enfants inscrits au club</div>
         <p class="muted" style="margin:0;font-size:13px">Si l'autre parent a déjà inscrit l'enfant, écris exactement le même prénom, nom et date de naissance : vous serez reliés au même enfant, avec les mêmes droits.</p>
@@ -327,7 +332,8 @@ function authView() {
           <div class="row" style="justify-content:space-between"><b style="font-size:14px">Enfant ${i + 1}</b>${i > 0 ? `<button type="button" class="link" data-delkid="${i}">Retirer</button>` : ""}</div>
           <div class="grid2"><label class="field">Prénom<input name="kFirst" value="${esc(k.first || "")}" required></label><label class="field">Nom<input name="kLast" value="${esc(k.last || "")}" required></label></div>
           <div class="grid2"><label class="field">Date de naissance<input name="kBirth" type="date" value="${esc(k.birth || "")}" required></label><label class="field">Équipe<select name="kTeam" required><option value="">Choisir…</option>${teamOptions(k.team)}</select></label></div>
-          <label class="field">C'est<select name="kGender" required><option value="">Choisir…</option><option value="F" ${k.gender === "F" ? "selected" : ""}>Une fille</option><option value="H" ${k.gender === "H" ? "selected" : ""}>Un garçon</option></select></label></div>`).join("")}
+          <label class="field">Publication de son image (réseaux, site, presse)<select name="kConsent" required><option value="">Choisir…</option><option value="true" ${k.consent === "true" ? "selected" : ""}>J'accepte</option><option value="false" ${k.consent === "false" ? "selected" : ""}>Je refuse</option></select></label>
+          <label class="field">Sexe<select name="kGender" required><option value="">…</option><option value="F" ${k.gender === "F" ? "selected" : ""}>♀</option><option value="H" ${k.gender === "H" ? "selected" : ""}>♂</option></select></label></div>`).join("")}
         <button type="button" class="btn ghost small" data-addkid style="align-self:flex-start">＋ Ajouter un autre enfant</button>
         <label class="check card" style="padding:10px 12px"><input type="checkbox" id="suLegal" ${S.suLegal ? "checked" : ""}><span><b>Je suis responsable légal</b> de ces enfants</span></label></div>` : ""}
       ${S.suKind === "parent" || S.suKind === "athlete" ? `<div class="stack" style="gap:8px"><div class="eyebrow">Personne à contacter en cas de problème</div>
@@ -389,7 +395,7 @@ function bindAuth() {
   const su = document.getElementById("signup");
   if (su && !S.signupTeams) sb.from("teams").select("id,name").order("position").then(({ data }) => { if (data && data.length) { S.signupTeams = data.map(t => [t.id, t.name]); } });
   $app.querySelectorAll("[name=suKind]").forEach(r => r.onchange = () => { keepSignup(); S.suKind = r.value; render(); });
-  const keepSignup = () => { const k = readKids(); S.suKids = k.length ? k : (S.suKids || [{}]); const gg = $app.querySelector("[name=suGender]:checked"); if (gg) S.suGender = gg.value; const lg = document.getElementById("suLegal"); if (lg) S.suLegal = lg.checked;
+  const keepSignup = () => { const k = readKids(); S.suKids = k.length ? k : (S.suKids || [{}]); const gg = $app.querySelector("[name=suGender]:checked"); if (gg) S.suGender = gg.value; const cc = consentVal($app, "suConsent"); if (cc !== null) S.suConsent = cc; const lg = document.getElementById("suLegal"); if (lg) S.suLegal = lg.checked;
     S.suVals = Object.fromEntries(["suFirst", "suLast", "suEmail", "suBirth", "suTeam", "suPhone", "suEmName", "suEmPhone"].map(id => [id, (document.getElementById(id) || {}).value || ""])); };
   if (su && S.suVals) { for (const [id, v] of Object.entries(S.suVals)) { const el = document.getElementById(id); if (el && v) el.value = v; } }
   const ak = $app.querySelector("[data-addkid]"); if (ak) ak.onclick = () => { keepSignup(); S.suKids.push({ last: (S.suKids[0] || {}).last || "" }); render(); };
@@ -398,17 +404,18 @@ function bindAuth() {
     if (!S.suKind) return authErr("Indique si tu es parent, athlète, coach ou membre du bureau.");
     const gs = $app.querySelector("[name=suGender]:checked");
     if (!gs) return authErr("Indique si tu es une femme ou un homme.");
-    const meta = { full_name: (val("suFirst") + " " + val("suLast")).trim(), kind: S.suKind === "other" ? "" : S.suKind, gender: gs.value, phone: val("suPhone") };
+    if (consentVal($app, "suConsent") === null) return authErr("Indique si tu acceptes ou refuses la publication de ton image.");
+    const meta = { full_name: (val("suFirst") + " " + val("suLast")).trim(), kind: S.suKind === "other" ? "" : S.suKind, gender: gs.value, phone: val("suPhone"), image_consent: consentVal($app, "suConsent") };
     if (document.getElementById("suEmName")) { meta.emergency_name = val("suEmName"); meta.emergency_phone = val("suEmPhone"); }
     if (document.getElementById("suLegal")) meta.legal = document.getElementById("suLegal").checked;
     if (S.suKind === "athlete") { meta.birth_date = val("suBirth"); meta.team = val("suTeam"); }
-    if (S.suKind === "parent") meta.children = readKids().filter(k => k.first && k.last);
+    if (S.suKind === "parent") meta.children = readKids().filter(k => k.first && k.last).map(k => ({ ...k, image_consent: k.consent === "" ? null : k.consent === "true", consent: undefined }));
     busy(su, true);
     const { data, error } = await sb.auth.signUp({ email: val("suEmail"), password: document.getElementById("suPass").value,
       options: { data: meta, emailRedirectTo: location.origin + location.pathname } });
     busy(su, false);
     if (error) return authErr(frError(error));
-    S.suKids = null; S.suVals = null; S.suGender = null; S.suLegal = false;
+    S.suKids = null; S.suVals = null; S.suGender = null; S.suLegal = false; S.suConsent = null;
     if (!data.session) { S.auth = "login"; render(); toast("Compte créé : clique sur le lien reçu par e-mail pour l'activer."); } };
   const fg = document.getElementById("forgot");
   if (fg) fg.onsubmit = async ev => { ev.preventDefault(); busy(fg, true);
@@ -440,18 +447,21 @@ window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); instal
 
 /* ============ Mon compte ============ */
 function accountView() {
-  return `<div class="card stack"><div class="row"><span class="av" style="width:48px;height:48px;font-size:16px">${initials(me.full_name)}</span><span><b style="font-size:17px">${esc(me.full_name)}</b><br><span class="muted">${esc(roleLabel(me))}</span></span></div>
-      <span class="muted" style="font-size:13.5px">${esc(myEmail)}</span></div>
+  return `<div class="card stack"><div class="row">${avatar(me, 56)}<span><b style="font-size:17px">${esc(me.full_name)}</b><br><span class="muted">${esc(roleLabel(me))}</span></span></div>
+      <span class="muted" style="font-size:13.5px">${esc(myEmail)}</span>
+      <div class="row" style="gap:6px">${photoBtn(me.id, me.photo_path ? "📷 Changer ma photo" : "📷 Ajouter ma photo")}</div></div>
     <form id="nameForm" class="card stack"><h2>Mes informations</h2>
-      <label class="field">Prénom et nom<input id="accName" value="${esc(me.full_name)}" required></label>
-      <div class="field">Tu es${genderPick("accGender", PV(me.id).gender)}</div>
+      ${nameFields("acc", me.full_name)}
+      <div class="field">Sexe${genderPick("accGender", PV(me.id).gender)}</div>
+      ${consentPick("accConsent", PV(me.id).image_consent, "de mon image")}
       <label class="field">Téléphone<input id="accPhone" type="tel" value="${esc(PV(me.id).phone || "")}" placeholder="06 12 34 56 78"></label>
-      ${me.role === "athlete" ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
+      ${isAth(me) ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
         <div class="grid2"><label class="field">Nom<input id="accEmName" value="${esc(PV(me.id).emergency_name || "")}"></label><label class="field">Téléphone<input id="accEmPhone" type="tel" value="${esc(PV(me.id).emergency_phone || "")}"></label></div>` : ""}
       <button class="btn small" style="align-self:flex-start">Enregistrer</button></form>
-    ${me.role === "parent" ? childrenOf(me.id).map(c => `<form class="card stack" data-kidform="${c.id}"><h2>${esc(c.full_name)}</h2>
+    ${childrenOf(me.id).length ? childrenOf(me.id).map(c => `<form class="card stack" data-kidform="${c.id}"><div class="row" style="gap:10px">${avatar(c, 48)}<h2 style="flex:1">${esc(c.full_name)}</h2>${photoBtn(c.id)}</div>
       <span class="muted" style="font-size:13px">${c.team_id ? esc(T(c.team_id).name) : "Sans équipe"}${c.birth_date ? " · né·e le " + fmtDate(c.birth_date + "T12:00:00") : ""}</span>
-      <div class="field">C'est${genderPick("kg-" + c.id, PV(c.id).gender, true)}</div>
+      <div class="field">Sexe${genderPick("kg-" + c.id, PV(c.id).gender, true)}</div>
+      ${consentPick("kc-" + c.id, PV(c.id).image_consent, "de l'image de " + esc(first(c.full_name)))}
       ${c.managed ? "" : `<label class="field">Téléphone de ${esc(first(c.full_name))}<input name="kPhone" type="tel" value="${esc(PV(c.id).phone || "")}"></label>`}
       <label class="check"><input type="checkbox" name="kLegal" ${isLegal(me.id, c.id) ? "checked" : ""}><span>Je suis <b>responsable légal</b> de ${esc(first(c.full_name))}</span></label>
       <div class="eyebrow">Personne à contacter en cas de problème</div>
@@ -473,7 +483,7 @@ function homeView() {
   const news = [...(D.news || [])].sort((a, b) => (b.pinned - a.pinned) || b.created_at.localeCompare(a.created_at));
   const tile = (attr, big, label, warn) => `<button class="card" ${attr} style="text-align:left;display:flex;flex-direction:column;gap:2px;${warn ? "border-color:var(--gold)" : ""}"><span style="font-family:var(--display);font-size:24px;font-weight:800;line-height:1">${big}</span><span class="muted" style="font-size:13px">${label}</span></button>`;
   return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:64px;border-radius:12px"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
-    ${!PV(me.id).gender || !PV(me.id).phone || (me.role === "parent" && childrenOf(me.id).some(c => !PV(c.id).gender || !PV(c.id).emergency_phone)) ? `<button class="card" data-tab="account" style="text-align:left;border-color:var(--gold);display:flex;flex-direction:column;gap:4px"><b>Complète ta fiche</b><span class="muted" style="font-size:13px">Indique ${me.role === "parent" ? "ton téléphone, le sexe de chaque enfant, le responsable légal et la personne à contacter en cas de problème" : "si tu es une femme ou un homme et ton téléphone"}.</span><span style="font-weight:700;color:var(--accent)">Compléter ›</span></button>` : ""}
+    ${!PV(me.id).gender || !PV(me.id).phone || PV(me.id).image_consent == null || childrenOf(me.id).some(c => !PV(c.id).gender || !PV(c.id).emergency_phone || PV(c.id).image_consent == null) ? `<button class="card" data-tab="account" style="text-align:left;border-color:var(--gold);display:flex;flex-direction:column;gap:4px"><b>Complète ta fiche</b><span class="muted" style="font-size:13px">Indique ${me.role === "parent" ? "ton téléphone, le sexe de chaque enfant, le droit à l'image, le responsable légal et la personne à contacter en cas de problème" : "si tu es une femme ou un homme, ton téléphone et ton accord pour la publication de ton image"}.</span><span style="font-weight:700;color:var(--accent)">Compléter ›</span></button>` : ""}
     <div class="grid2">
       ${tile('data-tab="chats"', un, un > 1 ? "messages non lus" : "message non lu", un > 0)}
       ${isBureau() ? tile('data-tab="bureau"', pending, "compte" + (pending > 1 ? "s" : "") + " à valider · Espace bureau", pending > 0)
@@ -506,7 +516,7 @@ function bureauBlock() {
   if (!members.length) return "";
   return `<h2 style="font-size:20px;margin-top:6px">Le bureau du club</h2>
     <p class="muted" style="margin:0;font-size:13.5px">Pour toute question, écris directement à un membre du bureau. La conversation reste privée entre vous deux.</p>
-    <div class="list">${members.map(p => `<div class="item"><span class="av" style="width:42px;height:42px;font-size:14px">${initials(p.full_name)}</span>
+    <div class="list">${members.map(p => `<div class="item">${avatar(p, 42)}
       <span class="txt"><span class="t1">${esc(p.full_name)}${p.id === me.id ? ' <span class="muted" style="font-weight:500">(toi)</span>' : ""}</span><span class="t2">${esc(p.title || "Membre du bureau")}</span></span>
       ${p.id !== me.id ? `<button class="btn small" data-conv="dm:${p.id}">💬 Écrire</button>` : ""}</div>`).join("")}</div>
     ${isBureau() ? `<p class="muted" style="margin:0;font-size:12.5px">La fonction de chaque membre (président, trésorière…) se règle dans sa fiche, onglet Espace bureau.</p>` : ""}`;
@@ -565,13 +575,40 @@ function eventCard(e) {
     </div></div>`;
 }
 
+/* Photo de profil (ou initiales) */
+function avatar(p, size = 36) {
+  const st = `width:${size}px;height:${size}px;font-size:${Math.round(size * .36)}px`;
+  return p && p.photo_path ? `<img class="av" data-path="${esc(p.photo_path)}" data-ini="${initials(p.full_name)}" alt="" style="${st};object-fit:cover">` : `<span class="av" style="${st}">${initials(p && p.full_name)}</span>`;
+}
+const photoBtn = (id, label = "📷 Photo") => `<label class="btn small ghost">${label}<input type="file" hidden accept="image/*" data-photo="${id}"></label>`;
+// Carré 480 px, pour une photo de profil légère
+async function squarePhoto(file) {
+  const bmp = await createImageBitmap(file), side = Math.min(bmp.width, bmp.height), out = 480;
+  const c = document.createElement("canvas"); c.width = c.height = out;
+  c.getContext("2d").drawImage(bmp, (bmp.width - side) / 2, (bmp.height - side) / 2, side, side, 0, 0, out, out);
+  const blob = await new Promise(res => c.toBlob(res, "image/jpeg", 0.85));
+  return new File([blob], "photo.jpg", { type: "image/jpeg" });
+}
+const consentTag = id => PV(id).image_consent === false ? '<span class="tag comp" style="font-size:10.5px;padding:2px 7px;white-space:nowrap" title="Refuse la publication de son image">📵 Pas de publication</span>' : "";
+function consentPick(name, val, who) {
+  return `<div class="field">Publication ${who} (réseaux sociaux, site du club, presse, affiches)<div class="chips" style="flex-wrap:wrap">
+    <label class="chip"><input type="radio" name="${name}" value="true" ${val === true ? "checked" : ""}> J'accepte</label>
+    <label class="chip"><input type="radio" name="${name}" value="false" ${val === false ? "checked" : ""}> Je refuse</label></div></div>`;
+}
+const consentVal = (root, name) => { const r = root.querySelector(`[name="${name}"]:checked`); return r ? r.value === "true" : null; };
+
 /* Coordonnées (fiche privée) */
 const PV = id => (D && D.priv[id]) || {};
 const GENDERS = [["F", "Femme"], ["H", "Homme"]];
 const genderLabel = (g, kid) => g === "F" ? (kid ? "Fille" : "Femme") : g === "H" ? (kid ? "Garçon" : "Homme") : "";
+const genderSign = g => g === "F" ? "♀" : g === "H" ? "♂" : "";
+// Deux cases Prénom / Nom (le nom complet reste enregistré en un seul champ)
+const splitName = n => { const w = (n || "").trim().split(/\s+/); return [w[0] || "", w.slice(1).join(" ")]; };
+const nameFields = (pre, full) => { const [f, l] = splitName(full); return `<div class="grid2"><label class="field">Prénom<input id="${pre}First" value="${esc(f)}" required></label><label class="field">Nom<input id="${pre}Last" value="${esc(l)}" required></label></div>`; };
+const joinName = pre => [document.getElementById(pre + "First").value, document.getElementById(pre + "Last").value].map(x => x.trim()).filter(Boolean).join(" ");
 const tel = p => p ? `<a href="tel:${esc(p.replace(/[^\d+]/g, ""))}">${esc(p)}</a>` : '<span class="muted">non renseigné</span>';
 const isLegal = (pid, aid) => !!(D.links.find(l => l.parent_id === pid && l.athlete_id === aid) || {}).legal;
-function genderPick(name, val, kid) { return `<div class="chips">${GENDERS.map(([v]) => `<label class="chip"><input type="radio" name="${name}" value="${v}" ${val === v ? "checked" : ""}> ${genderLabel(v, kid)}</label>`).join("")}</div>`; }
+function genderPick(name, val, kid) { return `<div class="chips">${GENDERS.map(([v]) => `<label class="chip" title="${genderLabel(v, kid)}"><input type="radio" name="${name}" value="${v}" ${val === v ? "checked" : ""} aria-label="${genderLabel(v, kid)}"> <span style="font-size:20px;line-height:1">${genderSign(v)}</span></label>`).join("")}</div>`; }
 // Bloc « contacts » d'un athlète : ses parents, le responsable légal, la personne à prévenir
 function contactsOf(a) {
   const pv = PV(a.id), par = parentsOf(a.id);
@@ -607,7 +644,7 @@ function attendanceBlock(e) {
   for (const a of mine) {
     const at = attOf(e.id, a.id), st = at ? at.status : "present", key = e.id + "|" + a.id;
     html += `<div class="stack" style="gap:6px;border-top:1px solid var(--line);padding-top:8px;margin-top:4px">
-      <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${me.role === "parent" ? esc(first(a.full_name)) : "Ma présence"}</span>
+      <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${a.id === me.id ? "Ma présence" : esc(first(a.full_name))}</span>
         <button class="btn small ${st === "present" ? "" : "ghost"}" data-att="${key}|present">✓ Présent·e</button>
         <button class="btn small ${st === "absent" ? "danger" : "ghost"}" data-att="${key}|absent">✗ Absent·e</button></div>
       ${st === "absent" ? `<div class="row" style="gap:6px;flex-wrap:wrap">
@@ -636,7 +673,7 @@ function rollView(id) {
     <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap"><span class="tag ok">${roll.length - ab} présent${roll.length - ab > 1 ? "s" : ""} sur ${roll.length}</span>${ab ? `<span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span>` : ""}</div>
     <p class="muted" style="margin:6px 0 0;font-size:12.5px">Tout le monde est compté présent, sauf si l'athlète ou un parent a déclaré une absence.</p></div>
     ${[...new Set(roll.map(a => a.team_id))].map(t => `<div class="daylabel">Équipe ${esc(T(t).name)}</div><div class="list">${roll.filter(a => a.team_id === t).sort((a, b) => isAbsent(e.id, b.id) - isAbsent(e.id, a.id)).map(a => { const at = attOf(e.id, a.id), st = at ? at.status : "present";
-      return `<div class="item" style="align-items:flex-start"><span class="av" style="width:36px;height:36px">${initials(a.full_name)}</span><span class="txt"><span class="t1">${esc(a.full_name)}</span>
+      return `<div class="item" style="align-items:flex-start">${avatar(a, 36)}<span class="txt"><span class="t1">${esc(a.full_name)} ${consentTag(a.id)}</span>
         ${st === "absent" ? `<span class="t2" style="white-space:normal">${esc(at.reason || "Pas de motif")}</span>${at.file_path ? `<button class="link" style="font-size:13px;padding:0;display:block" data-open="${esc(at.file_path)}">📎 Voir le justificatif</button>` : ""}` : ""}
         <details style="margin-top:4px"><summary class="muted" style="font-size:13px;cursor:pointer">Contacts</summary>${contactsOf(a)}</details></span>
         ${st === "absent" ? '<span class="tag comp">Absent·e</span>' : '<span class="tag ok">Présent·e</span>'}</div>`; }).join("")}</div>`).join("") || `<div class="empty">Aucun athlète dans ces équipes.</div>`}`;
@@ -677,13 +714,13 @@ function chatsView() {
 function contactsView() {
   const qs = (S.cq || "").toLowerCase(), list = dmPartners().filter(p => p.full_name.toLowerCase().includes(qs));
   const groups = [["Bureau", list.filter(p => p.role === "bureau")], ["Coachs", list.filter(p => p.role === "coach")],
-    ...D.teams.filter(t => isBureau() || myTeams().includes(t.id)).map(t => ["Équipe " + t.name, [...list.filter(p => p.role === "athlete" && p.team_id === t.id), ...list.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]])];
+    ...D.teams.filter(t => isBureau() || myTeams().includes(t.id)).map(t => ["Équipe " + t.name, [...list.filter(p => isAth(p) && p.team_id === t.id), ...list.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]])];
   return `<input class="search" id="cq" placeholder="Rechercher un nom…" aria-label="Rechercher">
-    ${groups.map(([g, l]) => l.length ? `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<button class="item" data-conv="dm:${p.id}"><span class="av" style="width:40px;height:40px;font-size:14px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabel(p))}</span></span><span class="btn small">💬</span></button>`).join("")}</div>` : "").join("") || `<div class="empty">Personne à qui écrire pour l'instant.</div>`}`;
+    ${groups.map(([g, l]) => l.length ? `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<button class="item" data-conv="dm:${p.id}">${avatar(p, 40)}<span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabel(p))}</span></span><span class="btn small">💬</span></button>`).join("")}</div>` : "").join("") || `<div class="empty">Personne à qui écrire pour l'instant.</div>`}`;
 }
 function dmRow(p) {
   const key = "dm:" + p.id, m = lastOf(key), n = unreadIn(key);
-  return `<button class="item" data-conv="${key}"><span class="av" style="width:40px;height:40px;font-size:14px">${initials(p.full_name)}</span>
+  return `<button class="item" data-conv="${key}">${avatar(p, 40)}
     <span class="txt"><span class="t1">${esc(p.full_name)}${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? (m.body || "📎 " + m.file_name) : roleLabel(p))}</span></span>
     <span class="when">${m ? fmtTs(m.created_at) : ""}</span></button>`;
 }
@@ -743,8 +780,15 @@ async function signedUrl(path) {
   return data.signedUrl;
 }
 async function fillImages() {
-  for (const img of $app.querySelectorAll("img[data-path]")) {
-    try { img.src = await signedUrl(img.dataset.path); } catch (e) { img.remove(); }
+  const imgs = [...$app.querySelectorAll("img[data-path]")];
+  // Liens demandés en une seule fois pour toutes les photos de la page
+  const need = [...new Set(imgs.map(i => i.dataset.path).filter(p => !(urlCache[p] && urlCache[p].exp > Date.now())))];
+  if (need.length > 1 && sb.storage.from(BUCKET).createSignedUrls) {
+    try { const { data } = await sb.storage.from(BUCKET).createSignedUrls(need, 3600);
+      (data || []).forEach(d => { if (d.signedUrl) urlCache[d.path] = { url: d.signedUrl, exp: Date.now() + 3500e3 }; }); } catch (e) {}
+  }
+  for (const img of imgs) {
+    try { img.src = await signedUrl(img.dataset.path); } catch (e) { if (img.classList.contains("av")) { const sp = document.createElement("span"); sp.className = "av"; sp.style.cssText = img.style.cssText; sp.textContent = img.dataset.ini || "?"; img.replaceWith(sp); } else img.remove(); }
   }
 }
 
@@ -909,7 +953,7 @@ function bureauDocs() {
   return `<div class="card"><div class="eyebrow">Dossiers complets</div><div style="font-family:var(--display);font-size:28px;font-weight:800">${complete}/${ath.length}</div></div>
     ${D.teams.map(t => { const l = ath.filter(a => a.team_id === t.id); if (!l.length) return "";
       return `<div class="daylabel">Équipe ${esc(t.name)}</div><div class="list">${l.map(a => { const m = missing(a), n = DOC_TYPES.length - m.length;
-        return `<button class="item" data-docfor="${a.id}"><span class="av" style="width:36px;height:36px">${initials(a.full_name)}</span><span class="txt"><span class="t1">${esc(a.full_name)}</span><span class="t2">${m.length ? "Manque : " + esc(m.join(", ")) : "Dossier complet"}</span></span><span class="tag ${m.length ? "warn" : "ok"}">${n}/${DOC_TYPES.length}</span></button>`; }).join("")}</div>`; }).join("") || `<div class="empty">Aucun athlète pour l'instant.</div>`}`;
+        return `<button class="item" data-docfor="${a.id}">${avatar(a, 36)}<span class="txt"><span class="t1">${esc(a.full_name)} ${consentTag(a.id)}</span><span class="t2">${m.length ? "Manque : " + esc(m.join(", ")) : "Dossier complet"}</span></span><span class="tag ${m.length ? "warn" : "ok"}">${n}/${DOC_TYPES.length}</span></button>`; }).join("")}</div>`; }).join("") || `<div class="empty">Aucun athlète pour l'instant.</div>`}`;
 }
 // Réduit les photos du téléphone (souvent 3 à 8 Mo) avant l'envoi
 async function shrink(file) {
@@ -942,11 +986,11 @@ function bureauView() {
   const askOf = p => p.wish === "parent" ? "Parent" + (D.links.some(l => l.parent_id === p.id) ? " de " + D.links.filter(l => l.parent_id === p.id).map(l => first(P(l.athlete_id).full_name)).join(", ") : "")
     : p.wish === "athlete" ? "Athlète" + (p.team_id ? " · " + T(p.team_id).name : "") : "Coach, bureau ou autre";
   const groups = [["Bureau", all.filter(p => p.role === "bureau")], ["Coachs", all.filter(p => p.role === "coach")],
-    ...D.teams.map(t => ["Équipe " + t.name, [...all.filter(p => p.role === "athlete" && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
+    ...D.teams.map(t => ["Équipe " + t.name, [...all.filter(p => isAth(p) && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
     ["Sans équipe ni enfant relié", all.filter(p => (p.role === "athlete" && !p.team_id) || (p.role === "parent" && !childrenOf(p.id).length))]];
   return `
     ${pending.length ? `<div class="card stack" style="border-color:var(--gold)"><h2>${pending.length} compte${pending.length > 1 ? "s" : ""} à valider</h2>
-      <div class="list">${pending.map(p => `<button class="item" data-member="${p.id}"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name || "Sans nom")}</span><span class="t2">Demande : ${esc(askOf(p))}</span></span><span class="tag warn">Valider</span></button>`).join("")}</div></div>` : ""}
+      <div class="list">${pending.map(p => `<button class="item" data-member="${p.id}">${avatar(p, 36)}<span class="txt"><span class="t1">${esc(p.full_name || "Sans nom")}</span><span class="t2">Demande : ${esc(askOf(p))}</span></span><span class="tag warn">Valider</span></button>`).join("")}</div></div>` : ""}
     <div class="grid2">
       <button class="card" data-goview="annonce" style="text-align:left;display:flex;flex-direction:column;gap:6px;border-color:var(--gold)"><span style="color:var(--accent)">${I.mega}</span><b>Annonce à toutes les équipes</b><span class="muted" style="font-size:13px">Publiée dans chaque tchat d'équipe</span></button>
       <button class="card" data-goview="addEvent" style="text-align:left;display:flex;flex-direction:column;gap:6px"><span style="color:var(--accent)">${I.cal}</span><b>Ajouter au planning</b><span class="muted" style="font-size:13px">Entraînement ou compétition</span></button>
@@ -954,7 +998,7 @@ function bureauView() {
     <div class="eyebrow">Membres du club · touche un nom pour lui écrire</div>
     <input class="search" id="q" placeholder="Rechercher un nom…" aria-label="Rechercher">
     ${groups.map(([g, l]) => { l = l.filter(p => p.full_name.toLowerCase().includes(qs)); if (!l.length) return "";
-      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><button ${p.managed ? `data-member="${p.id}"` : `data-conv="dm:${p.id}"`} style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;border:0;background:none;padding:0;text-align:left;color:inherit"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabelFull(p))}${p.managed ? " · sans compte" : ""}</span></span></button><button class="btn small ghost" data-member="${p.id}">Fiche</button>${p.managed ? "" : `<button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">💬</button>`}</div>`).join("")}</div>`; }).join("")}`;
+      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><button ${p.managed ? `data-member="${p.id}"` : `data-conv="dm:${p.id}"`} style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;border:0;background:none;padding:0;text-align:left;color:inherit">${avatar(p, 36)}<span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabelFull(p))}${p.managed ? " · sans compte" : ""}</span>${consentTag(p.id)}</span></button><button class="btn small ghost" data-member="${p.id}">Fiche</button>${p.managed ? "" : `<button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">💬</button>`}</div>`).join("")}</div>`; }).join("")}`;
 }
 function memberView(id) {
   const p = P(id);
@@ -964,19 +1008,21 @@ function memberView(id) {
   const kids = new Set(S.mKids || linked);
   const kidList = [...new Map([...athletes(), ...linked.map(P)].map(a => [a.id, a])).values()].sort((a, b) => (kids.has(b.id) - kids.has(a.id)) || a.full_name.localeCompare(b.full_name));
   return `<form id="memberForm" class="stack">
-    <div class="card stack"><div class="row"><span class="av" style="width:44px;height:44px">${initials(p.full_name)}</span><span><b>${esc(p.full_name || "Sans nom")}</b><br><span class="muted" id="mEmailTxt" style="font-size:13px">${esc(S.memberEmail.email)}</span></span></div></div>
+    <div class="card stack"><div class="row">${avatar(p, 56)}<span><b>${esc(p.full_name || "Sans nom")}</b><br><span class="muted" id="mEmailTxt" style="font-size:13px">${esc(S.memberEmail.email)}</span></span></div></div>
     ${p.managed ? `<div class="notice">${I.user}<span>Enfant <b>sans compte</b> : ses parents indiquent ses absences et envoient ses documents. Parents : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun"}.</span></div>` : ""}
     ${p.role === "pending" && p.wish ? `<p class="muted" style="margin:0;font-size:13px">À l'inscription, cette personne s'est déclarée <b>${p.wish === "parent" ? "parent" : "athlète"}</b>. Vérifie les informations puis enregistre.</p>` : ""}
-    <label class="field">Prénom et nom<input id="mName" value="${esc(p.full_name)}" required></label>
+    ${nameFields("m", p.full_name)}
+    <div class="row" style="gap:6px">${photoBtn(id, p.photo_path ? "📷 Changer la photo" : "📷 Ajouter une photo")}${consentTag(id)}</div>
     <div class="field">Sexe${genderPick("mGender", PV(id).gender, p.managed)}</div>
+    ${consentPick("mConsent", PV(id).image_consent, "de son image")}
     ${p.managed ? "" : `<label class="field">Téléphone<input id="mPhone" type="tel" value="${esc(PV(id).phone || "")}"></label>`}
-    ${role === "athlete" ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
+    ${role === "athlete" || isAth(p) ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
       <div class="grid2"><label class="field">Nom<input id="mEmName" value="${esc(PV(id).emergency_name || "")}"></label><label class="field">Téléphone<input id="mEmPhone" type="tel" value="${esc(PV(id).emergency_phone || "")}"></label></div>
       <div class="card stack" style="gap:6px"><b style="font-size:14px">Contacts</b>${contactsOf(p)}</div>` : ""}
     <label class="field">Rôle<select id="mRole">
       ${[["pending", "En attente (aucun accès)"], ["athlete", "Athlète"], ["parent", "Parent"], ["coach", "Coach"], ["bureau", "Membre du bureau"]].map(([v, l]) => `<option value="${v}" ${role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
-    ${role === "athlete" ? `<label class="field">Date de naissance<input id="mBirth" type="date" value="${esc(p.birth_date || "")}"></label>` : ""}
-    ${role === "athlete" ? `<label class="field">Équipe<select id="mTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
+    ${["athlete", "bureau", "coach"].includes(role) ? `<label class="field">Date de naissance<input id="mBirth" type="date" value="${esc(p.birth_date || "")}"></label>` : ""}
+    ${["athlete", "bureau", "coach"].includes(role) ? `<label class="field">${role === "athlete" ? "Équipe" : "Pratique aussi comme athlète dans l'équipe (facultatif)"}<select id="mTeam"><option value="">${role === "athlete" ? "Choisir…" : "Non, pas athlète"}</option>${D.teams.map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
     ${role === "coach" ? `<div class="field">Équipes entraînées<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="mct" value="${t.id}" ${coachTeamsOf(id).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div><span class="muted" style="font-size:13px;font-weight:400">Le coach voit le planning, le tchat et l'appel de ces équipes.</span></div>` : ""}
     ${role === "bureau" ? `<label class="field">Fonction<input id="mTitle" value="${esc(p.title || "")}" placeholder="Président, trésorière, coach…"></label>` : ""}
     ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${kidList.map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)}${a.birth_date ? ` <span class="muted" style="font-size:12.5px">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""} ${a.team_id ? teamChip(a.team_id) : '<span class="tag warn">Sans équipe</span>'}${a.role === "pending" ? ' <span class="tag warn">nouveau</span>' : ""}${isLegal(id, a.id) ? ' <span class="tag ok">responsable légal</span>' : ""}${parentsOf(a.id).filter(x => x.id !== id).length ? ` <span class="muted" style="font-size:12.5px">· autre parent : ${parentsOf(a.id).filter(x => x.id !== id).map(x => esc(first(x.full_name))).join(", ")}</span>` : ""}</span></label>`).join("") || '<span class="muted">Aucun enfant pour l\'instant : ajoute-le ci-dessous.</span>'}</div>
@@ -1088,6 +1134,17 @@ function bind() {
   on("[data-cancel]", () => { S.confirm = null; render(0); });
   on("[data-delev]", async b => { try { await q(sb.from("events").delete().eq("id", b.dataset.delev).select()); D.events = D.events.filter(e => e.id !== b.dataset.delev); S.confirm = null;
     if (S.view && S.view.kind === "trip") go("trips"); else render(0); toast("Supprimé du planning"); } catch (e) { fail(e); } });
+  on("[data-photo]", async inp => {
+    const f = inp.files[0], id = inp.dataset.photo; if (!f) return;
+    toast("Envoi de la photo…");
+    try { const sq = await squarePhoto(f), path = `avatars/${id}/${Date.now()}.jpg`;
+      const { error } = await sb.storage.from(BUCKET).upload(path, sq, { contentType: "image/jpeg" }); if (error) throw error;
+      const old = P(id).photo_path;
+      await q(sb.rpc("set_photo", { a: id, p: path }));
+      D.P[id] = { ...P(id), photo_path: path }; if (id === me.id) me.photo_path = path;
+      if (old) sb.storage.from(BUCKET).remove([old]).catch(() => {});
+      render(0); toast("Photo enregistrée"); } catch (e) { fail(e, "La photo n'a pas pu être envoyée."); }
+  }, "onchange");
   on("[data-delseries]", async b => {
     const e = D.events.find(x => x.id === b.dataset.delseries), ids = seriesOf(e).map(x => x.id);
     try { for (const c of chunks(ids)) await q(sb.from("events").delete().in("id", c).select());
@@ -1240,13 +1297,13 @@ function bind() {
   if (mr) mr.onchange = () => { S.mRole = mr.value; S.mKids = [...$app.querySelectorAll("[name=mkid]:checked")].map(x => x.value); render(0); };
   form("memberForm", async f => {
     const id = S.view.id, role = val("mRole");
-    const upd = { full_name: val("mName"), role, team_id: role === "athlete" ? (val("mTeam") || null) : null, title: role === "bureau" ? val("mTitle") : null };
+    const upd = { full_name: joinName("m"), role, team_id: ["athlete", "bureau", "coach"].includes(role) ? (val("mTeam") || null) : null, title: role === "bureau" ? val("mTitle") : null };
     if (document.getElementById("mBirth")) upd.birth_date = val("mBirth") || null;
     const mp = document.getElementById("mPlan"); if (mp) upd.can_plan = mp.checked; else if (role === "pending") upd.can_plan = false;
     if (role === "athlete" && !upd.team_id) return toast("Choisis l'équipe de l'athlète.");
     const [row] = await q(sb.from("profiles").update(upd).eq("id", id).select("*"));
     D.P[id] = row;
-    const mg = $app.querySelector("[name=mGender]:checked"), pp = { gender: mg ? mg.value : null };
+    const mg = $app.querySelector("[name=mGender]:checked"), pp = { gender: mg ? mg.value : null, image_consent: consentVal($app, "mConsent") };
     if (document.getElementById("mPhone")) pp.phone = val("mPhone");
     if (document.getElementById("mEmName")) { pp.emergency_name = val("mEmName"); pp.emergency_phone = val("mEmPhone"); }
     await savePriv(id, pp).catch(e => console.error(e));
@@ -1270,15 +1327,15 @@ function bind() {
   });
 
   form("nameForm", async () => {
-    const [row] = await q(sb.from("profiles").update({ full_name: val("accName") }).eq("id", me.id).select("*"));
+    const [row] = await q(sb.from("profiles").update({ full_name: joinName("acc") }).eq("id", me.id).select("*"));
     me = Object.assign(me, row); D.P[me.id] = me;
-    const g = $app.querySelector("[name=accGender]:checked"), patch = { gender: g ? g.value : null, phone: val("accPhone") };
+    const g = $app.querySelector("[name=accGender]:checked"), patch = { gender: g ? g.value : null, phone: val("accPhone"), image_consent: consentVal($app, "accConsent") };
     if (document.getElementById("accEmName")) { patch.emergency_name = val("accEmName"); patch.emergency_phone = val("accEmPhone"); }
     await savePriv(me.id, patch); render(0); toast("Informations enregistrées");
   });
   $app.querySelectorAll("[data-kidform]").forEach(f => f.onsubmit = async ev => { ev.preventDefault();
     const id = f.dataset.kidform, g = f.querySelector(`[name="kg-${id}"]:checked`), v = n => (f.querySelector(`[name=${n}]`) || {}).value;
-    try { const patch = { gender: g ? g.value : null, emergency_name: v("kEmName").trim(), emergency_phone: v("kEmPhone").trim() };
+    try { const patch = { gender: g ? g.value : null, emergency_name: v("kEmName").trim(), emergency_phone: v("kEmPhone").trim(), image_consent: consentVal(f, "kc-" + id) };
       if (f.querySelector("[name=kPhone]")) patch.phone = v("kPhone").trim();
       await savePriv(id, patch);
       const legal = f.querySelector("[name=kLegal]").checked;
