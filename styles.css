@@ -151,3 +151,4 @@ img{max-width:100%}
 .grid2 .card svg{width:26px;height:26px}
 .item .btn svg{width:16px;height:16px}
 .ev.depart{border-style:dashed;border-color:var(--gold)}
+.grid2 > *, .grid2 input, .grid2 select { min-width: 0; } .grid2 input, .grid2 select { width: 100%; box-sizing: border-box; }

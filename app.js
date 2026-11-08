@@ -63,7 +63,7 @@ let session = null;
 let me = null;          // mon profil
 let myEmail = "";
 let D = null;           // données chargées
-let S = { tab: "home", view: null, filter: "all", limit: 40 };
+let S = { tab: "home", view: null, filter: "mine", limit: 40 };
 let recovery = false;
 let installEvt = null;
 const urlCache = {};
@@ -84,6 +84,17 @@ function myTeams() {
   return [...new Set(childrenOf(me.id).map(c => c.team_id).filter(Boolean))].sort((a, b) => T(a).position - T(b).position);
 }
 function coachTeamsOf(id) { return (D.coachTeams || []).filter(c => c.coach_id === id).map(c => c.team_id).sort((a, b) => T(a).position - T(b).position); }
+// Mes propres équipes (la mienne, celles que j'entraîne, celles de mes enfants), pour le planning par défaut
+function ownTeams() {
+  const s = new Set();
+  if (me.role === "athlete" && me.team_id) s.add(me.team_id);
+  coachTeamsOf(me.id).forEach(t => s.add(t));
+  childrenOf(me.id).forEach(c => c.team_id && s.add(c.team_id));
+  return [...s].sort((a, b) => T(a).position - T(b).position);
+}
+// Équipes affichées par défaut : les miennes si j'en ai, sinon toutes celles que je vois
+function defaultTeams() { const all = planTeams(), own = ownTeams().filter(t => all.includes(t)); return own.length ? own : all; }
+const TEAM_LIST = [["lionceaux", "Lionceaux"], ["tigrous", "Tigrous"], ["tigroux", "Tigroux"], ["servals", "Servals"], ["cougars", "Cougars"], ["panthers", "Panthers"], ["pom", "Pom"]];
 function myAthletes() { return me.role === "athlete" ? [me] : me.role === "parent" ? childrenOf(me.id) : []; }
 function childrenIn(team) { return me.role === "parent" ? childrenOf(me.id).filter(c => c.team_id === team) : []; }
 function athletes() { return Object.values(D.P).filter(p => p.role === "athlete").sort((a, b) => a.full_name.localeCompare(b.full_name)); }
@@ -106,7 +117,7 @@ function markRead(key) { const r = readMap(); r[key] = new Date().toISOString();
 function unreadIn(key) { const r = readMap()[key] || "1970"; return D.msgs.filter(m => convOf(m) === key && m.sender_id !== me.id && m.created_at > r).length; }
 // Personnes à qui je peux écrire en privé
 function dmPartners() {
-  const all = Object.values(D.P).filter(p => p.id !== me.id && p.role !== "pending");
+  const all = Object.values(D.P).filter(p => p.id !== me.id && p.role !== "pending" && !p.managed);
   if (isBureau()) return all;
   const mine = myTeams();
   return all.filter(p => {
@@ -192,7 +203,15 @@ async function loadAll() {
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news };
+  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {} };
+  await loadSummary();
+}
+// Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
+async function loadSummary(ids) {
+  const today = todayIso(), until = addDays(today, 70);
+  ids = ids || D.events.filter(e => e.date >= today && e.date <= until).slice(0, 500).map(e => e.id);
+  if (!ids.length) return;
+  try { (await q(sb.rpc("attendance_summary", { ids }))).forEach(r => D.sum[r.event_id] = r); } catch (e) { /* base pas encore à jour */ }
 }
 async function reload() { try { await loadAll(); render(); } catch (e) { fail(e); } }
 
@@ -284,17 +303,28 @@ function render(keepBottom) {
 }
 
 /* ============ Connexion ============ */
+function teamOptions(sel) { return (S.signupTeams || TEAM_LIST).map(([id, name]) => `<option value="${id}" ${sel === id ? "selected" : ""}>${esc(name)}</option>`).join(""); }
+function readKids() { return [...$app.querySelectorAll("[data-kid]")].map(c => ({ first: c.querySelector("[name=kFirst]").value.trim(), last: c.querySelector("[name=kLast]").value.trim(), birth: c.querySelector("[name=kBirth]").value, team: c.querySelector("[name=kTeam]").value })); }
 function authView() {
   const m = S.auth || "login";
   const head = `<div class="brand"><img src="icons/logo.webp" alt="Logo Pau Cheerleading"><div class="eyebrow">Application du club</div><div class="logo">Pau<br><span>Cheerleading</span></div></div>`;
   if (m === "signup") return `<div class="login pad">${head}
     <form id="signup" class="authbox"><h2>Créer mon compte</h2>
-      <label class="field">Prénom et nom<input id="suName" autocomplete="name" required></label>
+      <div class="field">Je suis<div class="chips">${[["parent", "Parent"], ["athlete", "Athlète"], ["other", "Coach ou bureau"]].map(([v, l]) => `<label class="chip"><input type="radio" name="suKind" value="${v}" ${S.suKind === v ? "checked" : ""}> ${l}</label>`).join("")}</div></div>
+      <div class="grid2"><label class="field">Prénom<input id="suFirst" autocomplete="given-name" required></label><label class="field">Nom<input id="suLast" autocomplete="family-name" required></label></div>
+      ${S.suKind === "athlete" ? `<div class="grid2"><label class="field">Date de naissance<input id="suBirth" type="date" required></label><label class="field">Équipe<select id="suTeam" required><option value="">Choisir…</option>${teamOptions()}</select></label></div>` : ""}
+      ${S.suKind === "parent" ? `<div class="stack" style="gap:8px"><div class="eyebrow">Mes enfants inscrits au club</div>
+        <p class="muted" style="margin:0;font-size:13px">Si l'autre parent a déjà inscrit l'enfant, écris exactement le même prénom, nom et date de naissance : vous serez reliés au même enfant, avec les mêmes droits.</p>
+        ${(S.suKids || [{}]).map((k, i) => `<div class="card stack" style="gap:8px;padding:10px 12px" data-kid="${i}">
+          <div class="row" style="justify-content:space-between"><b style="font-size:14px">Enfant ${i + 1}</b>${i > 0 ? `<button type="button" class="link" data-delkid="${i}">Retirer</button>` : ""}</div>
+          <div class="grid2"><label class="field">Prénom<input name="kFirst" value="${esc(k.first || "")}" required></label><label class="field">Nom<input name="kLast" value="${esc(k.last || "")}" required></label></div>
+          <div class="grid2"><label class="field">Date de naissance<input name="kBirth" type="date" value="${esc(k.birth || "")}" required></label><label class="field">Équipe<select name="kTeam" required><option value="">Choisir…</option>${teamOptions(k.team)}</select></label></div></div>`).join("")}
+        <button type="button" class="btn ghost small" data-addkid style="align-self:flex-start">＋ Ajouter un autre enfant</button></div>` : ""}
       <label class="field">E-mail<input id="suEmail" type="email" autocomplete="email" required></label>
       <label class="field">Mot de passe (8 caractères minimum)<input id="suPass" type="password" autocomplete="new-password" minlength="8" required></label>
       <div class="err" id="authErr" hidden></div>
       <button class="btn">Créer mon compte</button>
-      <p class="muted" style="margin:0;font-size:13px">Après la création, un membre du bureau valide ton compte et le relie à ton équipe ou à tes enfants.</p>
+      <p class="muted" style="margin:0;font-size:13px">Après la création, un membre du bureau vérifie et valide ton compte.</p>
       <button type="button" class="link" data-auth="login">J'ai déjà un compte</button></form></div>`;
   if (m === "forgot") return `<div class="login pad">${head}
     <form id="forgot" class="authbox"><h2>Mot de passe oublié</h2>
@@ -320,7 +350,7 @@ function recoveryView() {
 function pendingView() {
   return `<div class="login pad"><div class="brand"><img src="icons/logo.webp" alt="Logo Pau Cheerleading"><div class="logo">Bienvenue${me && me.full_name ? ",<br><span>" + esc(first(me.full_name)) + "</span>" : ""}</div></div>
     <div class="card stack"><b>Ton compte attend la validation du bureau.</b>
-    <span class="muted">Un membre du bureau va le relier à ton équipe (athlète) ou à tes enfants (parent). Tu pourras ensuite voir le planning et les tchats.</span>
+    <span class="muted">${me && me.wish === "parent" ? "Un membre du bureau va vérifier tes enfants et leur équipe. Tu pourras ensuite voir leur planning, leurs tchats et indiquer leurs absences." : "Un membre du bureau va vérifier ton compte et ton équipe. Tu pourras ensuite voir le planning et les tchats."}</span>
     <button class="btn" id="refresh">Actualiser</button></div>
     ${installCard()}
     <button class="link" id="logout">Se déconnecter</button></div>`;
@@ -344,11 +374,23 @@ function bindAuth() {
     const { error } = await sb.auth.signInWithPassword({ email: val("liEmail"), password: document.getElementById("liPass").value });
     busy(li, false); if (error) authErr(frError(error)); };
   const su = document.getElementById("signup");
-  if (su) su.onsubmit = async ev => { ev.preventDefault(); busy(su, true);
+  if (su && !S.signupTeams) sb.from("teams").select("id,name").order("position").then(({ data }) => { if (data && data.length) { S.signupTeams = data.map(t => [t.id, t.name]); } });
+  $app.querySelectorAll("[name=suKind]").forEach(r => r.onchange = () => { keepSignup(); S.suKind = r.value; render(); });
+  const keepSignup = () => { const k = readKids(); S.suKids = k.length ? k : (S.suKids || [{}]); S.suVals = Object.fromEntries(["suFirst", "suLast", "suEmail", "suBirth", "suTeam"].map(id => [id, (document.getElementById(id) || {}).value || ""])); };
+  if (su && S.suVals) { for (const [id, v] of Object.entries(S.suVals)) { const el = document.getElementById(id); if (el && v) el.value = v; } }
+  const ak = $app.querySelector("[data-addkid]"); if (ak) ak.onclick = () => { keepSignup(); S.suKids.push({ last: (S.suKids[0] || {}).last || "" }); render(); };
+  $app.querySelectorAll("[data-delkid]").forEach(b => b.onclick = () => { keepSignup(); S.suKids.splice(+b.dataset.delkid, 1); render(); });
+  if (su) su.onsubmit = async ev => { ev.preventDefault();
+    if (!S.suKind) return authErr("Indique si tu es parent, athlète, coach ou membre du bureau.");
+    const meta = { full_name: (val("suFirst") + " " + val("suLast")).trim(), kind: S.suKind === "other" ? "" : S.suKind };
+    if (S.suKind === "athlete") { meta.birth_date = val("suBirth"); meta.team = val("suTeam"); }
+    if (S.suKind === "parent") meta.children = readKids().filter(k => k.first && k.last);
+    busy(su, true);
     const { data, error } = await sb.auth.signUp({ email: val("suEmail"), password: document.getElementById("suPass").value,
-      options: { data: { full_name: val("suName") }, emailRedirectTo: location.origin + location.pathname } });
+      options: { data: meta, emailRedirectTo: location.origin + location.pathname } });
     busy(su, false);
     if (error) return authErr(frError(error));
+    S.suKids = null; S.suVals = null;
     if (!data.session) { S.auth = "login"; render(); toast("Compte créé : clique sur le lien reçu par e-mail pour l'activer."); } };
   const fg = document.getElementById("forgot");
   if (fg) fg.onsubmit = async ev => { ev.preventDefault(); busy(fg, true);
@@ -390,11 +432,11 @@ function accountView() {
 
 /* ============ Accueil et actualités ============ */
 function homeView() {
-  const today = todayIso(), teams = planTeams();
+  const today = todayIso(), teams = defaultTeams();
   const next = D.events.filter(e => e.date >= today && e.teams.some(t => teams.includes(t))).slice(0, 3);
   const un = totalUnread();
   const missing = myAthletes().reduce((n, a) => n + DOC_TYPES.filter(t => !docsOf(a.id).some(d => d.doc_type === t)).length, 0);
-  const pending = isBureau() ? Object.values(D.P).filter(p => p.role === "pending").length : 0;
+  const pending = isBureau() ? Object.values(D.P).filter(p => p.role === "pending" && !p.managed).length : 0;
   const news = [...(D.news || [])].sort((a, b) => (b.pinned - a.pinned) || b.created_at.localeCompare(a.created_at));
   const tile = (attr, big, label, warn) => `<button class="card" ${attr} style="text-align:left;display:flex;flex-direction:column;gap:2px;${warn ? "border-color:var(--gold)" : ""}"><span style="font-family:var(--display);font-size:24px;font-weight:800;line-height:1">${big}</span><span class="muted" style="font-size:13px">${label}</span></button>`;
   return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:auto"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
@@ -438,10 +480,11 @@ function bureauBlock() {
 
 /* ============ Planning ============ */
 function planningView() {
-  const teams = planTeams();
-  const f = S.filter !== "all" && teams.includes(S.filter) ? S.filter : "all";
+  const teams = planTeams(), own = ownTeams().filter(t => teams.includes(t)), hasMine = own.length > 0 && own.length < teams.length;
+  const f = S.filter === "mine" ? (hasMine ? "mine" : "all") : S.filter !== "all" && teams.includes(S.filter) ? S.filter : "all";
+  const shownTeams = f === "all" ? teams : f === "mine" ? own : [f];
   const today = todayIso();
-  let evs = D.events.filter(e => e.date >= today && e.teams.some(t => f === "all" ? teams.includes(t) : t === f));
+  let evs = D.events.filter(e => e.date >= today && e.teams.some(t => shownTeams.includes(t)));
   evs = evs.concat(evs.filter(e => e.type === "comp").map(e => ({ e, tr: tripOfEvent(e.id) })).filter(x => x.tr && x.tr.depart_date && x.tr.depart_date < x.e.date && x.tr.depart_date >= today)
     .map(({ e, tr }) => ({ ...e, id: "dep-" + e.id, type: "depart", date: tr.depart_date, start_time: tr.depart_time || "00:00", end_time: "", title: "Départ pour : " + e.title, place: tr.depart_place, _trip: tr })))
     .sort((a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time));
@@ -456,7 +499,7 @@ function planningView() {
   }
   return `${intro}
     ${canPlan() ? `<button class="btn" data-addev style="align-self:flex-start">＋ Ajouter un événement</button>` : ""}
-    ${teams.length > 1 ? `<div class="chips"><button class="chip" data-filter="all" aria-pressed="${f === "all"}">Toutes</button>${teams.map(t => `<button class="chip" data-filter="${esc(t)}" aria-pressed="${f === t}"><span class="dot" style="background:${T(t).color}"></span>${esc(T(t).name)}</button>`).join("")}</div>` : ""}
+    ${teams.length > 1 ? `<div class="chips">${hasMine ? `<button class="chip" data-filter="mine" aria-pressed="${f === "mine"}">${own.length > 1 ? "Mes équipes" : "Mon équipe"}</button>` : ""}<button class="chip" data-filter="all" aria-pressed="${f === "all"}">Toutes</button>${teams.map(t => `<button class="chip" data-filter="${esc(t)}" aria-pressed="${f === t}"><span class="dot" style="background:${T(t).color}"></span>${esc(T(t).name)}</button>`).join("")}</div>` : ""}
     ${nextComp ? `<button class="card" data-trip="${tripOfEvent(nextComp.id).id}" style="text-align:left;display:flex;flex-direction:column;gap:4px;border-color:var(--gold)">
       <span class="eyebrow" style="color:var(--accent)">Prochaine compétition</span>
       <span style="font-weight:800;font-family:var(--display);font-size:18px">${esc(nextComp.title)}</span>
@@ -485,6 +528,7 @@ function eventCard(e) {
 
 /* ============ Présences aux entraînements ============ */
 function attOf(eid, aid) { return (D.attendance || []).find(a => a.event_id === eid && a.athlete_id === aid); }
+const isAbsent = (eid, aid) => (attOf(eid, aid) || {}).status === "absent";
 function rollAthletes(e) {
   const teams = isBureau() ? e.teams : me.role === "coach" ? e.teams.filter(t => coachTeamsOf(me.id).includes(t)) : [];
   return athletes().filter(a => teams.includes(a.team_id));
@@ -493,7 +537,7 @@ function attendanceBlock(e) {
   let html = "";
   const mine = myAthletes().filter(a => e.teams.includes(a.team_id));
   for (const a of mine) {
-    const at = attOf(e.id, a.id), st = at && at.status, key = e.id + "|" + a.id;
+    const at = attOf(e.id, a.id), st = at ? at.status : "present", key = e.id + "|" + a.id;
     html += `<div class="stack" style="gap:6px;border-top:1px solid var(--line);padding-top:8px;margin-top:4px">
       <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${me.role === "parent" ? esc(first(a.full_name)) : "Ma présence"}</span>
         <button class="btn small ${st === "present" ? "" : "ghost"}" data-att="${key}|present">✓ Présent·e</button>
@@ -507,26 +551,33 @@ function attendanceBlock(e) {
   }
   const roll = rollAthletes(e);
   if (roll.length) {
-    const n = s => roll.filter(a => (attOf(e.id, a.id) || {}).status === s).length, p = n("present"), ab = n("absent");
-    html += `<button class="row" data-roll="${e.id}" style="gap:8px;border:0;background:var(--surface-2);border-radius:10px;padding:8px 10px;font-size:13px;margin-top:4px;text-align:left;width:100%">
-      <span class="tag ok">${p} présent${p > 1 ? "s" : ""}</span><span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span><span class="muted">${roll.length - p - ab} sans réponse</span><span style="margin-left:auto;font-weight:700">Voir l'appel ›</span></button>`;
+    const ab = roll.filter(a => isAbsent(e.id, a.id)).length, p = roll.length - ab;
+    html += `<button class="row" data-roll="${e.id}" style="gap:8px;border:0;background:var(--surface-2);border-radius:10px;padding:8px 10px;font-size:13px;margin-top:4px;text-align:left;width:100%;flex-wrap:wrap">
+      <span class="tag ok">${p} présent${p > 1 ? "s" : ""} sur ${roll.length}</span>${ab ? `<span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span>` : ""}<span style="margin-left:auto;font-weight:700">Voir l'appel ›</span></button>`;
+  } else {
+    const sm = D.sum[e.id];
+    if (sm && sm.total) { const p = sm.total - sm.absent;
+      html += `<div class="row" style="gap:8px;font-size:13px;margin-top:4px;flex-wrap:wrap"><span class="tag ok">${p} présent${p > 1 ? "s" : ""} sur ${sm.total}</span>${sm.absent ? `<span class="muted">${sm.absent} absent${sm.absent > 1 ? "s" : ""}</span>` : ""}</div>`; }
   }
   return html;
 }
 function rollView(id) {
   const e = D.events.find(x => x.id === id); if (!e) return `<div class="empty">Cet événement n'existe plus.</div>`;
-  const roll = rollAthletes(e);
-  return `<div class="card"><b>${esc(e.title)}</b><br><span class="muted" style="text-transform:capitalize">${fmtDay(e.date)} · ${hm(e.start_time)}</span></div>
-    ${[...new Set(roll.map(a => a.team_id))].map(t => `<div class="daylabel">Équipe ${esc(T(t).name)}</div><div class="list">${roll.filter(a => a.team_id === t).map(a => { const at = attOf(e.id, a.id), st = at && at.status;
+  const roll = rollAthletes(e), ab = roll.filter(a => isAbsent(e.id, a.id)).length;
+  return `<div class="card"><b>${esc(e.title)}</b><br><span class="muted" style="text-transform:capitalize">${fmtDay(e.date)} · ${hm(e.start_time)}</span>
+    <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap"><span class="tag ok">${roll.length - ab} présent${roll.length - ab > 1 ? "s" : ""} sur ${roll.length}</span>${ab ? `<span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span>` : ""}</div>
+    <p class="muted" style="margin:6px 0 0;font-size:12.5px">Tout le monde est compté présent, sauf si l'athlète ou un parent a déclaré une absence.</p></div>
+    ${[...new Set(roll.map(a => a.team_id))].map(t => `<div class="daylabel">Équipe ${esc(T(t).name)}</div><div class="list">${roll.filter(a => a.team_id === t).sort((a, b) => isAbsent(e.id, b.id) - isAbsent(e.id, a.id)).map(a => { const at = attOf(e.id, a.id), st = at ? at.status : "present";
       return `<div class="item" style="align-items:flex-start"><span class="av" style="width:36px;height:36px">${initials(a.full_name)}</span><span class="txt"><span class="t1">${esc(a.full_name)}</span>
         ${st === "absent" ? `<span class="t2" style="white-space:normal">${esc(at.reason || "Pas de motif")}</span>${at.file_path ? `<button class="link" style="font-size:13px;padding:0;display:block" data-open="${esc(at.file_path)}">📎 Voir le justificatif</button>` : ""}` : ""}</span>
-        ${st === "present" ? '<span class="tag ok">Présent·e</span>' : st === "absent" ? '<span class="tag comp">Absent·e</span>' : '<span class="tag warn">Sans réponse</span>'}</div>`; }).join("")}</div>`).join("") || `<div class="empty">Aucun athlète dans ces équipes.</div>`}`;
+        ${st === "absent" ? '<span class="tag comp">Absent·e</span>' : '<span class="tag ok">Présent·e</span>'}</div>`; }).join("")}</div>`).join("") || `<div class="empty">Aucun athlète dans ces équipes.</div>`}`;
 }
 async function saveAtt(eid, aid, patch) {
   const cur = attOf(eid, aid) || { event_id: eid, athlete_id: aid, status: "absent", reason: "" };
   const row = { event_id: eid, athlete_id: aid, status: cur.status, reason: cur.reason || "", file_path: cur.file_path || null, file_name: cur.file_name || null, ...patch, updated_by: me.id, updated_at: new Date().toISOString() };
   const [res] = await q(sb.from("attendance").upsert(row).select());
   D.attendance = (D.attendance || []).filter(a => !(a.event_id === eid && a.athlete_id === aid)).concat([res]);
+  await loadSummary([eid]);
 }
 
 /* ============ Tchats ============ */
@@ -818,13 +869,15 @@ async function uploadDoc(aid, type, file) {
 function bureauView() {
   const qs = (S.q || "").toLowerCase();
   const all = Object.values(D.P).filter(p => p.id !== me.id);
-  const pending = all.filter(p => p.role === "pending");
+  const pending = all.filter(p => p.role === "pending" && !p.managed);
+  const askOf = p => p.wish === "parent" ? "Parent" + (D.links.some(l => l.parent_id === p.id) ? " de " + D.links.filter(l => l.parent_id === p.id).map(l => first(P(l.athlete_id).full_name)).join(", ") : "")
+    : p.wish === "athlete" ? "Athlète" + (p.team_id ? " · " + T(p.team_id).name : "") : "Coach, bureau ou autre";
   const groups = [["Bureau", all.filter(p => p.role === "bureau")], ["Coachs", all.filter(p => p.role === "coach")],
     ...D.teams.map(t => ["Équipe " + t.name, [...all.filter(p => p.role === "athlete" && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
     ["Sans équipe ni enfant relié", all.filter(p => (p.role === "athlete" && !p.team_id) || (p.role === "parent" && !childrenOf(p.id).length))]];
   return `
     ${pending.length ? `<div class="card stack" style="border-color:var(--gold)"><h2>${pending.length} compte${pending.length > 1 ? "s" : ""} à valider</h2>
-      <div class="list">${pending.map(p => `<button class="item" data-member="${p.id}"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name || "Sans nom")}</span><span class="t2">Choisir : athlète, parent, coach ou bureau</span></span><span class="tag warn">Valider</span></button>`).join("")}</div></div>` : ""}
+      <div class="list">${pending.map(p => `<button class="item" data-member="${p.id}"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name || "Sans nom")}</span><span class="t2">Demande : ${esc(askOf(p))}</span></span><span class="tag warn">Valider</span></button>`).join("")}</div></div>` : ""}
     <div class="grid2">
       <button class="card" data-goview="annonce" style="text-align:left;display:flex;flex-direction:column;gap:6px;border-color:var(--gold)"><span style="color:var(--accent)">${I.mega}</span><b>Annonce à toutes les équipes</b><span class="muted" style="font-size:13px">Publiée dans chaque tchat d'équipe</span></button>
       <button class="card" data-goview="addEvent" style="text-align:left;display:flex;flex-direction:column;gap:6px"><span style="color:var(--accent)">${I.cal}</span><b>Ajouter au planning</b><span class="muted" style="font-size:13px">Entraînement ou compétition</span></button>
@@ -832,27 +885,38 @@ function bureauView() {
     <div class="eyebrow">Membres du club · touche un nom pour lui écrire</div>
     <input class="search" id="q" placeholder="Rechercher un nom…" aria-label="Rechercher">
     ${groups.map(([g, l]) => { l = l.filter(p => p.full_name.toLowerCase().includes(qs)); if (!l.length) return "";
-      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><button data-conv="dm:${p.id}" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;border:0;background:none;padding:0;text-align:left;color:inherit"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabelFull(p))}</span></span></button><button class="btn small ghost" data-member="${p.id}">Fiche</button><button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">💬</button></div>`).join("")}</div>`; }).join("")}`;
+      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><button ${p.managed ? `data-member="${p.id}"` : `data-conv="dm:${p.id}"`} style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;border:0;background:none;padding:0;text-align:left;color:inherit"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabelFull(p))}${p.managed ? " · sans compte" : ""}</span></span></button><button class="btn small ghost" data-member="${p.id}">Fiche</button>${p.managed ? "" : `<button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">💬</button>`}</div>`).join("")}</div>`; }).join("")}`;
 }
 function memberView(id) {
   const p = P(id);
   if (!S.memberEmail || S.memberEmail.id !== id) { S.memberEmail = { id, email: "…" }; sb.from("profile_private").select("email").eq("id", id).maybeSingle().then(({ data }) => { S.memberEmail = { id, email: (data && data.email) || "" }; const el = document.getElementById("mEmailTxt"); if (el) el.textContent = S.memberEmail.email; }); }
-  const role = S.mRole || p.role;
-  const kids = new Set(S.mKids || D.links.filter(l => l.parent_id === id).map(l => l.athlete_id));
+  const role = S.mRole || (p.role === "pending" && p.wish && !p.managed ? p.wish : p.role);
+  const linked = D.links.filter(l => l.parent_id === id).map(l => l.athlete_id);
+  const kids = new Set(S.mKids || linked);
+  const kidList = [...new Map([...athletes(), ...linked.map(P)].map(a => [a.id, a])).values()].sort((a, b) => (kids.has(b.id) - kids.has(a.id)) || a.full_name.localeCompare(b.full_name));
   return `<form id="memberForm" class="stack">
     <div class="card stack"><div class="row"><span class="av" style="width:44px;height:44px">${initials(p.full_name)}</span><span><b>${esc(p.full_name || "Sans nom")}</b><br><span class="muted" id="mEmailTxt" style="font-size:13px">${esc(S.memberEmail.email)}</span></span></div></div>
+    ${p.managed ? `<div class="notice">${I.user}<span>Enfant <b>sans compte</b> : ses parents indiquent ses absences et envoient ses documents. Parents : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun"}.</span></div>` : ""}
+    ${p.role === "pending" && p.wish ? `<p class="muted" style="margin:0;font-size:13px">À l'inscription, cette personne s'est déclarée <b>${p.wish === "parent" ? "parent" : "athlète"}</b>. Vérifie les informations puis enregistre.</p>` : ""}
     <label class="field">Prénom et nom<input id="mName" value="${esc(p.full_name)}" required></label>
     <label class="field">Rôle<select id="mRole">
       ${[["pending", "En attente (aucun accès)"], ["athlete", "Athlète"], ["parent", "Parent"], ["coach", "Coach"], ["bureau", "Membre du bureau"]].map(([v, l]) => `<option value="${v}" ${role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    ${role === "athlete" ? `<label class="field">Date de naissance<input id="mBirth" type="date" value="${esc(p.birth_date || "")}"></label>` : ""}
     ${role === "athlete" ? `<label class="field">Équipe<select id="mTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
     ${role === "coach" ? `<div class="field">Équipes entraînées<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="mct" value="${t.id}" ${coachTeamsOf(id).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div><span class="muted" style="font-size:13px;font-weight:400">Le coach voit le planning, le tchat et l'appel de ces équipes.</span></div>` : ""}
     ${role === "bureau" ? `<label class="field">Fonction<input id="mTitle" value="${esc(p.title || "")}" placeholder="Président, trésorière, coach…"></label>` : ""}
-    ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${athletes().map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)} ${a.team_id ? teamChip(a.team_id) : ""}</span></label>`).join("") || '<span class="muted">Valide d\'abord les comptes des athlètes.</span>'}</div></div>` : ""}
+    ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${kidList.map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)}${a.birth_date ? ` <span class="muted" style="font-size:12.5px">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""} ${a.team_id ? teamChip(a.team_id) : '<span class="tag warn">Sans équipe</span>'}${a.role === "pending" ? ' <span class="tag warn">nouveau</span>' : ""}${parentsOf(a.id).filter(x => x.id !== id).length ? ` <span class="muted" style="font-size:12.5px">· autre parent : ${parentsOf(a.id).filter(x => x.id !== id).map(x => esc(first(x.full_name))).join(", ")}</span>` : ""}</span></label>`).join("") || '<span class="muted">Aucun enfant pour l\'instant : ajoute-le ci-dessous.</span>'}</div>
+      <span class="muted" style="font-size:12.5px;font-weight:400">Les enfants cochés et « nouveaux » sont validés en même temps que le parent.</span></div>
+      <details class="card"><summary style="font-weight:700;cursor:pointer">＋ Ajouter un enfant</summary><div class="stack" style="margin-top:10px">
+        <div class="grid2"><label class="field">Prénom<input id="akFirst"></label><label class="field">Nom<input id="akLast" value="${esc((p.full_name || "").trim().split(/\s+/).slice(1).join(" "))}"></label></div>
+        <div class="grid2"><label class="field">Date de naissance<input id="akBirth" type="date"></label><label class="field">Équipe<select id="akTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></label></div>
+        <p class="muted" style="margin:0;font-size:12.5px">Si l'enfant existe déjà (même prénom, nom et date de naissance), le parent est simplement relié à lui.</p>
+        <button type="button" class="btn small" data-addchild="${id}" style="align-self:flex-start">Ajouter l'enfant</button></div></details>` : ""}
     ${role !== "pending" ? (role === "bureau" ? `<p class="muted" style="margin:0;font-size:13px">Les membres du bureau peuvent toujours gérer le planning et les déplacements.</p>`
       : `<label class="check card" style="padding:10px 12px"><input type="checkbox" id="mPlan" ${p.can_plan ? "checked" : ""}><span><b>Peut gérer le planning</b><br><span class="muted" style="font-size:13px">Ajouter, modifier et supprimer les événements, compétitions et déplacements.</span></span></label>`) : ""}
     ${role === "athlete" ? `<p class="muted" style="margin:0;font-size:13px">Parents reliés : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun pour l'instant (à faire depuis la fiche du parent)"}.</p>` : ""}
     <button class="btn">Enregistrer</button>
-    <button type="button" class="btn ghost" data-conv="dm:${id}">Envoyer un message privé</button>
+    ${p.managed ? "" : `<button type="button" class="btn ghost" data-conv="dm:${id}">Envoyer un message privé</button>`}
   </form>`;
 }
 
@@ -934,6 +998,13 @@ function bind() {
       const { error } = await sb.storage.from(BUCKET).upload(path, f, { contentType: f.type || undefined }); if (error) throw error;
       await saveAtt(eid, aid, { file_path: path, file_name: f.name }); render(0); toast("Justificatif envoyé"); } catch (e) { fail(e, "L'envoi n'a pas marché. Réessaie."); }
   }, "onchange");
+  on("[data-addchild]", async b => {
+    const g = id => (document.getElementById(id) || {}).value || "", pid = b.dataset.addchild;
+    if (!g("akFirst").trim() || !g("akLast").trim()) return toast("Indique le prénom et le nom de l'enfant.");
+    try { S.mKids = [...$app.querySelectorAll("[name=mkid]:checked")].map(x => x.value);
+      const cid = await q(sb.rpc("add_child", { p_parent: pid, p_first: g("akFirst"), p_last: g("akLast"), p_birth: g("akBirth") || null, p_team: g("akTeam") || null }));
+      await loadAll(); if (cid && !S.mKids.includes(cid)) S.mKids.push(cid); render(0); toast("Enfant ajouté et relié au parent"); } catch (e) { fail(e, "Ça n'a pas marché. La base est-elle à jour (mise à jour 6) ?"); }
+  });
   on("[data-addev]", () => { S.evType = "train"; go("planning", { kind: "addEvent" }); });
   on("[data-editev]", b => go("planning", { kind: "editEvent", id: b.dataset.editev }));
   on("[data-askdel]", b => { S.confirm = b.dataset.askdel; render(0); });
@@ -1076,6 +1147,7 @@ function bind() {
   form("memberForm", async f => {
     const id = S.view.id, role = val("mRole");
     const upd = { full_name: val("mName"), role, team_id: role === "athlete" ? (val("mTeam") || null) : null, title: role === "bureau" ? val("mTitle") : null };
+    if (document.getElementById("mBirth")) upd.birth_date = val("mBirth") || null;
     const mp = document.getElementById("mPlan"); if (mp) upd.can_plan = mp.checked; else if (role === "pending") upd.can_plan = false;
     if (role === "athlete" && !upd.team_id) return toast("Choisis l'équipe de l'athlète.");
     const [row] = await q(sb.from("profiles").update(upd).eq("id", id).select("*"));
@@ -1085,6 +1157,9 @@ function bind() {
       await q(sb.from("parent_links").delete().eq("parent_id", id).select());
       if (kids.length) await q(sb.from("parent_links").insert(kids.map(a => ({ parent_id: id, athlete_id: a }))).select());
       D.links = D.links.filter(l => l.parent_id !== id).concat(kids.map(a => ({ parent_id: id, athlete_id: a })));
+      // Les enfants déclarés à l'inscription sont validés avec leur parent
+      const news = kids.filter(a => P(a).role === "pending");
+      if (news.length) for (const r of await q(sb.from("profiles").update({ role: "athlete" }).in("id", news).select("*"))) D.P[r.id] = r;
     }
     if (role === "coach" || (D.coachTeams || []).some(c => c.coach_id === id)) {
       const ct = role === "coach" ? [...f.querySelectorAll("[name=mct]:checked")].map(x => x.value) : [];

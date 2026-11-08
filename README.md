@@ -26,7 +26,7 @@ organisation des déplacements (départ, déroulé, checklist « À emporter »,
 ## Premier démarrage
 
 1. Le **premier compte créé devient automatiquement membre du bureau** : c'est le compte du responsable de l'app.
-2. Les athlètes et les parents créent ensuite leur compte depuis l'app. Ils arrivent « en attente ».
+2. Les athlètes et les parents créent ensuite leur compte depuis l'app. Un parent indique à l'inscription le prénom, le nom, la date de naissance et l'équipe de chaque enfant (un enfant sans téléphone n'a pas besoin de compte). Si les deux parents inscrivent le même enfant, ils sont reliés au même enfant. Les comptes arrivent « en attente ».
 3. Dans l'onglet **Bureau**, le bureau valide chaque compte : athlète (avec son équipe), parent (avec ses enfants) ou bureau.
 
 ## Installer l'app sur un téléphone
