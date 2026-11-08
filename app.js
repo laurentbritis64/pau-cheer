@@ -104,7 +104,21 @@ function msgsOf(key) { return D.msgs.filter(m => convOf(m) === key).sort((a, b) 
 function readMap() { return store.get("pau-read-" + me.id, {}); }
 function markRead(key) { const r = readMap(); r[key] = new Date().toISOString(); store.set("pau-read-" + me.id, r); }
 function unreadIn(key) { const r = readMap()[key] || "1970"; return D.msgs.filter(m => convOf(m) === key && m.sender_id !== me.id && m.created_at > r).length; }
-function dmPartners() { return isBureau() ? Object.values(D.P).filter(p => p.id !== me.id && p.role !== "pending") : Object.values(D.P).filter(p => p.role === "bureau"); }
+// Personnes à qui je peux écrire en privé
+function dmPartners() {
+  const all = Object.values(D.P).filter(p => p.id !== me.id && p.role !== "pending");
+  if (isBureau()) return all;
+  const mine = myTeams();
+  return all.filter(p => {
+    if (p.role === "bureau") return true;
+    if (p.role === "coach") return coachTeamsOf(p.id).some(t => mine.includes(t));
+    if (me.role === "coach") {
+      if (p.role === "athlete") return mine.includes(p.team_id);
+      if (p.role === "parent") return childrenOf(p.id).some(c => mine.includes(c.team_id));
+    }
+    return false;
+  });
+}
 function totalUnread() {
   let n = 0;
   for (const t of myTeams()) n += unreadIn("team:" + t);
@@ -228,6 +242,7 @@ function render(keepBottom) {
     }
     if (S.tab === "chats") {
       if (v && v.kind === "conv") { const r = convView(v.key); title = r.title; body = r.body; composer = r.composer; back = () => go("chats"); }
+      else if (v && v.kind === "contacts") { title = "Écrire à…"; body = contactsView(); back = () => go("chats"); }
       else { title = "Tchats"; body = chatsView(); }
     }
     if (S.tab === "trips") {
@@ -526,19 +541,25 @@ function chatsView() {
       <span class="txt"><span class="t1">Équipe ${esc(tm.name)}${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? preview(m) : sub)}</span></span>
       <span class="when">${m ? fmtTs(m.created_at) : ""}</span></button>`;
   }).join("") || `<div class="item muted">Aucune équipe pour l'instant.</div>`;
-  let partners = dmPartners();
-  if (isBureau()) {
-    const withMsgs = new Set(D.msgs.filter(m => !m.team_id).map(convOf).map(k => k.slice(3)));
-    partners = partners.filter(p => withMsgs.has(p.id));
-  }
+  // Conversations déjà commencées, plus le bureau et les coachs (pour les athlètes et parents)
+  const withMsgs = new Set(D.msgs.filter(m => !m.team_id).map(convOf).map(k => k.slice(3)));
+  const always = isBureau() || me.role === "coach" ? [] : dmPartners().map(p => p.id);
+  let partners = Object.values(D.P).filter(p => p.id !== me.id && (withMsgs.has(p.id) || always.includes(p.id)));
   partners.sort((a, b) => ((lastOf("dm:" + b.id) || {}).created_at || "").localeCompare((lastOf("dm:" + a.id) || {}).created_at || ""));
   const dmRows = partners.map(dmRow).join("") || `<div class="item muted">Aucune conversation privée pour l'instant.</div>`;
   return `
     <div class="eyebrow">${me.role === "athlete" ? "Mon équipe" : me.role === "parent" ? "Équipes de mes enfants" : "Toutes les équipes"}</div>
     <div class="list">${teamRows}</div>
-    <div class="row" style="justify-content:space-between"><div class="eyebrow">Messages privés</div>${isBureau() ? `<button class="btn small ghost" data-tab="bureau">Écrire à quelqu'un</button>` : ""}</div>
+    <div class="row" style="justify-content:space-between"><div class="eyebrow">Messages privés</div><button class="btn small" data-contacts>💬 Écrire à quelqu'un</button></div>
     <div class="list">${dmRows}</div>
-    <div class="notice">${I.lock}<span>${isBureau() ? "Les messages privés ne sont visibles que par toi et la personne concernée." : "Les messages privés avec le bureau ne sont visibles par personne d'autre."}</span></div>`;
+    <div class="notice">${I.lock}<span>${isBureau() ? "Les messages privés ne sont visibles que par toi et la personne concernée." : "Les messages privés ne sont visibles que par toi et la personne à qui tu écris."}</span></div>`;
+}
+function contactsView() {
+  const qs = (S.cq || "").toLowerCase(), list = dmPartners().filter(p => p.full_name.toLowerCase().includes(qs));
+  const groups = [["Bureau", list.filter(p => p.role === "bureau")], ["Coachs", list.filter(p => p.role === "coach")],
+    ...D.teams.filter(t => isBureau() || myTeams().includes(t.id)).map(t => ["Équipe " + t.name, [...list.filter(p => p.role === "athlete" && p.team_id === t.id), ...list.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]])];
+  return `<input class="search" id="cq" placeholder="Rechercher un nom…" aria-label="Rechercher">
+    ${groups.map(([g, l]) => l.length ? `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<button class="item" data-conv="dm:${p.id}"><span class="av" style="width:40px;height:40px;font-size:14px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabel(p))}</span></span><span class="btn small">💬</span></button>`).join("")}</div>` : "").join("") || `<div class="empty">Personne à qui écrire pour l'instant.</div>`}`;
 }
 function dmRow(p) {
   const key = "dm:" + p.id, m = lastOf(key), n = unreadIn(key);
@@ -808,10 +829,10 @@ function bureauView() {
       <button class="card" data-goview="annonce" style="text-align:left;display:flex;flex-direction:column;gap:6px;border-color:var(--gold)"><span style="color:var(--accent)">${I.mega}</span><b>Annonce à toutes les équipes</b><span class="muted" style="font-size:13px">Publiée dans chaque tchat d'équipe</span></button>
       <button class="card" data-goview="addEvent" style="text-align:left;display:flex;flex-direction:column;gap:6px"><span style="color:var(--accent)">${I.cal}</span><b>Ajouter au planning</b><span class="muted" style="font-size:13px">Entraînement ou compétition</span></button>
     </div>
-    <div class="eyebrow">Membres du club · message privé ou fiche</div>
+    <div class="eyebrow">Membres du club · touche un nom pour lui écrire</div>
     <input class="search" id="q" placeholder="Rechercher un nom…" aria-label="Rechercher">
     ${groups.map(([g, l]) => { l = l.filter(p => p.full_name.toLowerCase().includes(qs)); if (!l.length) return "";
-      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabelFull(p))}</span></span><button class="btn small ghost" data-member="${p.id}">Fiche</button><button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">${I.lock}</button></div>`).join("")}</div>`; }).join("")}`;
+      return `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<div class="item"><button data-conv="dm:${p.id}" style="display:flex;gap:12px;align-items:center;flex:1;min-width:0;border:0;background:none;padding:0;text-align:left;color:inherit"><span class="av" style="width:36px;height:36px">${initials(p.full_name)}</span><span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabelFull(p))}</span></span></button><button class="btn small ghost" data-member="${p.id}">Fiche</button><button class="btn small" data-conv="dm:${p.id}" aria-label="Message privé à ${esc(p.full_name)}">💬</button></div>`).join("")}</div>`; }).join("")}`;
 }
 function memberView(id) {
   const p = P(id);
@@ -898,6 +919,7 @@ function bind() {
     const n = D.news.find(x => x.id === b.dataset.pinnews); if (!n) return;
     try { const [row] = await q(sb.from("news").update({ pinned: !n.pinned }).eq("id", n.id).select()); Object.assign(n, row); render(0); } catch (e) { fail(e); }
   });
+  on("[data-contacts]", () => { S.cq = ""; go("chats", { kind: "contacts" }); });
   on("[data-roll]", b => go("planning", { kind: "roll", id: b.dataset.roll }));
   on("[data-att]", async b => {
     const [eid, aid, st] = b.dataset.att.split("|");
@@ -958,6 +980,8 @@ function bind() {
   const form = (id, fn) => { const f = document.getElementById(id); if (f) f.onsubmit = async ev => { ev.preventDefault(); const b = f.querySelector("button:not([type=button])"); if (b) b.disabled = true; try { await fn(f); } catch (e) { fail(e); } finally { if (b && document.body.contains(b)) b.disabled = false; } }; };
   const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
 
+  const cq = document.getElementById("cq");
+  if (cq) { cq.value = S.cq || ""; cq.oninput = () => { S.cq = cq.value; render(0); }; }
   const qi = document.getElementById("q");
   if (qi) { qi.value = S.q || ""; qi.oninput = () => { S.q = qi.value; render(0); }; }
 
