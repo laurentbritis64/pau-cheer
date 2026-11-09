@@ -3,7 +3,8 @@
 -- À coller dans Supabase > SQL Editor > New query > Run (après la mise à jour 11)
 -- Peut être relancé sans créer de doublons.
 -- Les absences déjà déclarées sur les entraînements conservés sont gardées.
--- Les entraînements de toutes les équipes pendant les vacances scolaires sont supprimés.
+-- Les entraînements de toutes les équipes pendant les vacances scolaires sont supprimés,
+-- sauf ceux des Servals le 16 février et le 13 avril.
 -- =====================================================================
 do $$
 declare
@@ -11,7 +12,7 @@ declare
   eid uuid;
   tid uuid;
   tue date[] := array['2026-11-10','2026-11-17','2026-11-24','2026-12-01','2026-12-08','2026-12-15',
-    '2027-01-05','2027-01-12','2027-01-19','2027-01-26','2027-02-02','2027-02-09',
+    '2027-01-05','2027-01-12','2027-01-19','2027-01-26','2027-02-02','2027-02-09','2027-02-16',
     '2027-03-02','2027-03-09','2027-03-16','2027-03-23','2027-03-30','2027-04-06','2027-04-13','2027-04-27',
     '2027-05-04','2027-05-11','2027-05-18','2027-05-25','2027-06-01','2027-06-08','2027-06-15','2027-06-22','2027-06-29']::date[];
   fri date[] := array['2026-11-13','2026-11-27','2026-12-04','2026-12-11','2026-12-18',
@@ -77,5 +78,8 @@ begin
    where t.type = 'train' and t.date >= current_date
      and (t.date between '2026-12-19' and '2027-01-03'
        or t.date between '2027-02-13' and '2027-02-28'
-       or t.date between '2027-04-10' and '2027-04-25');
+       or t.date between '2027-04-10' and '2027-04-25')
+     -- exceptions : les Servals s'entraînent quand même le 16 février et le 13 avril
+     and not (t.date in ('2027-02-16', '2027-04-13')
+              and (select array_agg(team_id) from event_teams where event_id = t.id) = array['servals']);
 end $$;
