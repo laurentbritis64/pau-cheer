@@ -578,8 +578,9 @@ function planningView() {
   const f = S.filter === "mine" ? (hasMine ? "mine" : "all") : S.filter !== "all" && teams.includes(S.filter) ? S.filter : "all";
   const shownTeams = f === "all" ? teams : f === "mine" ? own : [f];
   const today = todayIso();
-  let evs = D.events.filter(e => e.date >= today && e.teams.some(t => shownTeams.includes(t)));
-  evs = evs.concat(evs.filter(e => e.type === "comp").map(e => ({ e, tr: tripOfEvent(e.id) })).filter(x => x.tr && x.tr.depart_date && x.tr.depart_date < x.e.date && x.tr.depart_date >= today)
+  const cat = EV_TYPES[S.cat] ? S.cat : "all";
+  let evs = D.events.filter(e => e.date >= today && e.teams.some(t => shownTeams.includes(t)) && (cat === "all" || e.type === cat));
+  evs = evs.concat(evs.filter(e => e.type === "comp" && (cat === "all" || cat === "comp")).map(e => ({ e, tr: tripOfEvent(e.id) })).filter(x => x.tr && x.tr.depart_date && x.tr.depart_date < x.e.date && x.tr.depart_date >= today)
     .map(({ e, tr }) => ({ ...e, id: "dep-" + e.id, type: "depart", date: tr.depart_date, start_time: tr.depart_time || "00:00", end_time: "", title: "Départ pour : " + e.title, place: tr.depart_place, _trip: tr })))
     .sort((a, b) => (a.date + a.start_time).localeCompare(b.date + b.start_time));
   const shown = evs.slice(0, S.limit);
@@ -594,6 +595,7 @@ function planningView() {
   return `${intro}
     ${canPlan() || manageTeams().length ? `<div class="row" style="gap:8px;flex-wrap:wrap">${canPlan() ? `<button class="btn" data-addev>＋ Ajouter un événement</button>` : ""}${manageTeams().length ? `<button class="btn ghost" data-manageteams>👥 Gérer les équipes${reqsToDecide().length ? ` (${reqsToDecide().length})` : ""}</button>` : ""}</div>` : ""}
     ${teams.length > 1 ? `<div class="chips">${hasMine ? `<button class="chip" data-filter="mine" aria-pressed="${f === "mine"}">${own.length > 1 ? "Mes équipes" : "Mon équipe"}</button>` : ""}<button class="chip" data-filter="all" aria-pressed="${f === "all"}">Toutes</button>${teams.map(t => `<button class="chip" data-filter="${esc(t)}" aria-pressed="${f === t}"><span class="dot" style="background:${T(t).color}"></span>${esc(T(t).name)}</button>`).join("")}</div>` : ""}
+    <div class="chips">${[["all", "Tout"], ...Object.entries(EV_PLURAL)].map(([k, l]) => `<button class="chip cat-${k}" data-cat="${k}" aria-pressed="${cat === k}">${l}</button>`).join("")}</div>
     ${nextComp ? `<button class="card" data-trip="${tripOfEvent(nextComp.id).id}" style="text-align:left;display:flex;flex-direction:column;gap:4px;border-color:var(--gold)">
       <span class="eyebrow" style="color:var(--accent)">Prochaine compétition</span>
       <span style="font-weight:800;font-family:var(--display);font-size:18px">${esc(nextComp.title)}</span>
@@ -612,8 +614,8 @@ function eventCard(e) {
   const teams = planTeams(), tr = e._trip || tripOfEvent(e.id), dep = e.type === "depart";
   const kids = me.role === "parent" ? e.teams.flatMap(childrenIn).map(c => first(c.full_name)) : [];
   return `<div class="card ev ${e.type}">
-    <div class="time">${hm(e.start_time)}<small>${hm(e.end_time)}</small></div>
-    <div class="body"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="tag ${e.type === "train" ? "train" : "comp"}">${e.type === "comp" ? "Compétition" : dep ? "Départ" : "Entraînement"}</span>${e.teams.filter(t => teams.includes(t)).map(teamChip).join("")}</div>
+    <div class="time">${hm(e.start_time)}<small>${hm(e.end_time)}</small>${e.no_time ? `<small style="font-weight:600;color:var(--warn)">à confirmer</small>` : ""}</div>
+    <div class="body"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="tag ${dep ? "comp" : e.type}">${dep ? "Départ" : evLabel(e.type)}</span>${e.teams.filter(t => teams.includes(t)).map(teamChip).join("")}</div>
       <div class="title">${esc(e.title)}</div><div class="muted" style="font-size:13px">${esc(e.place)}</div>
       ${kids.length ? `<div style="font-size:13px">Concerne : ${kids.map(esc).join(", ")}</div>` : ""}
       ${dep ? "" : attendanceBlock(e)}
@@ -677,6 +679,14 @@ async function savePriv(id, patch) {
   const [row] = await q(sb.from("profile_private").upsert({ id, ...patch }).select());
   D.priv[id] = row || { ...PV(id), ...patch };
 }
+
+/* Catégories d'événements */
+const EV_TYPES = { train: "Entraînement", comp: "Compétition", camp: "Camp / stage", event: "Événement club" };
+const EV_PLURAL = { train: "Entraînements", comp: "Compétitions", camp: "Camps / stages", event: "Événements" };
+const evLabel = t => EV_TYPES[t] || "Événement";
+// Vacances scolaires (zone A) : pas d'entraînement, sautées quand on répète un entraînement chaque semaine
+const HOLIDAYS = [["2026-10-17", "2026-11-01"], ["2026-12-19", "2027-01-03"], ["2027-02-13", "2027-02-28"], ["2027-04-10", "2027-04-25"], ["2027-07-03", "2027-08-31"]];
+const inHolidays = d => HOLIDAYS.some(([a, b]) => d >= a && d <= b);
 
 /* Série d'entraînements : même titre, mêmes équipes, même jour de la semaine et même heure, à partir de cette date */
 function seriesOf(e) {
@@ -1102,11 +1112,13 @@ function editEventView(id) {
   if (!e) return `<div class="empty">Cet événement n'existe plus.</div>`;
   const tr = tripOfEvent(id);
   return `<form id="editev" class="stack">
-    <span class="tag ${e.type === "comp" ? "comp" : "train"}" style="align-self:flex-start">${e.type === "comp" ? "Compétition" : "Entraînement"}</span>
+    ${e.type === "comp" ? `<span class="tag comp" style="align-self:flex-start">Compétition</span>`
+      : `<label class="field">Catégorie<select id="eeType">${["train", "camp", "event"].map(t => `<option value="${t}" ${e.type === t ? "selected" : ""}>${EV_TYPES[t]}</option>`).join("")}</select></label>`}
     <label class="field">Titre<input id="eeTitle" value="${esc(e.title)}" required></label>
     <div class="field">Équipes<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="eetm" value="${t.id}" ${e.teams.includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div></div>
     <label class="field">Date<input id="eeDate" type="date" value="${e.date}" required></label>
     <div class="grid2"><label class="field">Début<input id="eeS" type="time" value="${hm(e.start_time)}" required></label><label class="field">Fin<input id="eeE" type="time" value="${hm(e.end_time)}" required></label></div>
+    <label class="check"><input type="checkbox" id="eeNoTime" ${e.no_time ? "checked" : ""}><span>Horaire à confirmer</span></label>
     <label class="field">Lieu<input id="eePlace" value="${esc(e.place)}" required></label>
     ${seriesOf(e).length > 1 ? `<div class="field">Appliquer la modification à
       <label class="check card" style="padding:10px 12px"><input type="radio" name="eeScope" value="one" checked><span>Cet entraînement seulement</span></label>
@@ -1122,13 +1134,15 @@ function annonceView() {
     <button class="btn">Publier l'annonce</button></form>`;
 }
 function addEventView() {
-  const comp = S.evType === "comp";
+  const ty = EV_TYPES[S.evType] ? S.evType : "train", comp = ty === "comp", tbd = !!S.evTbd;
+  const ph = { train: "", comp: "Ex : Championnat régional", camp: "Ex : Camp tumbling avec Lauriane", event: "Ex : Gala, showcase…" }[ty];
   return `<form id="addev" class="stack">
-    <label class="field">Type<select id="evType"><option value="train" ${comp ? "" : "selected"}>Entraînement</option><option value="comp" ${comp ? "selected" : ""}>Compétition</option></select></label>
-    <label class="field">Titre<input id="evTitle" value="${comp ? "" : "Entraînement"}" placeholder="${comp ? "Ex : Championnat régional" : ""}" required></label>
+    <label class="field">Catégorie<select id="evType">${Object.entries(EV_TYPES).map(([k, l]) => `<option value="${k}" ${ty === k ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+    <label class="field">Titre<input id="evTitle" value="${ty === "train" ? "Entraînement" : ""}" placeholder="${ph}" required></label>
     <div class="field">Équipes<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="evtm" value="${t.id}"> ${esc(t.name)}</label>`).join("")}</div></div>
     <label class="field">Date<input id="evDate" type="date" value="${addDays(todayIso(), 7)}" required></label>
-    <div class="grid2"><label class="field">Début<input id="evS" type="time" value="${comp ? "09:00" : "18:00"}" required></label><label class="field">Fin<input id="evE" type="time" value="${comp ? "18:00" : "20:00"}" required></label></div>
+    <div class="grid2"><label class="field">Début<input id="evS" type="time" value="${tbd ? "14:00" : comp ? "09:00" : "18:00"}" required></label><label class="field">Fin<input id="evE" type="time" value="${tbd ? "17:00" : comp ? "18:00" : "20:00"}" required></label></div>
+    ${ty !== "train" ? `<label class="check"><input type="checkbox" id="evNoTime" ${tbd ? "checked" : ""}><span>Horaire à confirmer (mis de 14h00 à 17h00)</span></label>` : ""}
     <label class="field">Lieu<input id="evPlace" value="${comp ? "" : "Salle Sainte-Ursule, Pau"}" required></label>
     ${comp ? `<div class="stack"><div class="eyebrow">Déplacement</div>
       <p class="muted" style="margin:0;font-size:13px">Par défaut : départ la veille au soir et retour dans la nuit suivante. Change les dates pour un déplacement plus long.</p>
@@ -1140,13 +1154,15 @@ function addEventView() {
       <label class="field">Hébergement (si nuit sur place)<input id="trLodging" placeholder="Hôtel, adresse…"></label>
       <label class="field">Responsable et téléphone<input id="trContact" value="${esc(me.full_name)}"></label>
       <p class="muted" style="margin:0;font-size:13px">Une liste « À emporter » de base est créée, tu pourras la modifier dans le déplacement.</p></div>`
-    : `<label class="check"><input type="checkbox" id="evRepeat"><span>Répéter chaque semaine jusqu'au</span></label><input id="evUntil" type="date" class="search" value="2027-06-30">`}
+    : ty === "train" ? `<label class="check"><input type="checkbox" id="evRepeat"><span>Répéter chaque semaine jusqu'au</span></label><input id="evUntil" type="date" class="search" value="2027-06-30">
+      <p class="muted" style="margin:0;font-size:12.5px">Les vacances scolaires sont sautées automatiquement.</p>` : ""}
     <button class="btn">Ajouter au planning</button></form>`;
 }
 
 /* ============ Actions ============ */
 function bind() {
   const on = (sel, fn, evt = "onclick") => $app.querySelectorAll(sel).forEach(el => el[evt] = ev => fn(el, ev));
+  on("[data-cat]", b => { S.cat = b.dataset.cat; S.limit = 40; render(); });
   on("[data-filter]", b => { S.filter = b.dataset.filter; S.limit = 40; render(); });
   on("[data-more]", () => { S.limit += 60; render(0); });
   on("[data-trip]", b => { S.editTrip = null; go("trips", { kind: "trip", id: b.dataset.trip }); });
@@ -1302,14 +1318,17 @@ function bind() {
   const evd = document.getElementById("evDate");
   if (evd && document.getElementById("trDate")) evd.onchange = () => { document.getElementById("trDate").value = addDays(evd.value, -1); document.getElementById("trRDate").value = addDays(evd.value, 1); };
   const ty = document.getElementById("evType");
-  if (ty) ty.onchange = () => { S.evType = ty.value; S.skipRestore = true; render(0); };
+  if (ty) ty.onchange = () => { S.evType = ty.value; S.evTbd = false; S.skipRestore = true; render(0); };
+  const ntc = document.getElementById("evNoTime"); if (ntc) ntc.onchange = () => { S.evTbd = ntc.checked; if (ntc.checked) { document.getElementById("evS").value = "14:00"; document.getElementById("evE").value = "17:00"; } };
   form("addev", async f => {
     const tms = [...f.querySelectorAll("[name=evtm]:checked")].map(x => x.value);
     if (!tms.length) return toast("Choisis au moins une équipe.");
     const type = val("evType"), base = { type, title: val("evTitle"), start_time: val("evS"), end_time: val("evE"), place: val("evPlace"), created_by: me.id };
+    const ntb = document.getElementById("evNoTime"); if (ntb && ntb.checked) base.no_time = true;
     let dates = [val("evDate")];
     const rep = document.getElementById("evRepeat");
-    if (type === "train" && rep && rep.checked) { const until = val("evUntil"); dates = []; for (let d = val("evDate"); d <= until && dates.length < 60; d = addDays(d, 7)) dates.push(d); }
+    if (type === "train" && rep && rep.checked) { const until = val("evUntil"); dates = []; for (let d = val("evDate"); d <= until && dates.length < 60; d = addDays(d, 7)) if (!inHolidays(d)) dates.push(d);
+      if (!dates.length) return toast("Toutes ces dates tombent pendant les vacances."); }
     let step = "création de l'événement";
     try {
     const evs = await q(sb.from("events").insert(dates.map(date => ({ ...base, date }))).select());
@@ -1345,6 +1364,8 @@ function bind() {
     const e = D.events.find(x => x.id === id), sc = f.querySelector("[name=eeScope]:checked");
     const list = sc && sc.value === "next" ? seriesOf(e) : [e], shift = dayDiff(e.date, val("eeDate"));
     const base = { title: val("eeTitle"), start_time: val("eeS"), end_time: val("eeE"), place: val("eePlace") };
+    const nt = document.getElementById("eeNoTime"); if (nt) base.no_time = nt.checked;
+    if (document.getElementById("eeType")) base.type = val("eeType");
     if (shift === 0) { for (const c of chunks(list.map(x => x.id))) await q(sb.from("events").update(base).in("id", c).select()); }
     else for (const c of chunks(list, 10)) await Promise.all(c.map(x => q(sb.from("events").update({ ...base, date: addDays(x.date, shift) }).eq("id", x.id).select())));
     if ([...tms].sort().join(",") !== [...e.teams].sort().join(",")) for (const c of chunks(list.map(x => x.id))) {

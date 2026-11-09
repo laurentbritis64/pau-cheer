@@ -1165,3 +1165,9 @@ begin
 end $$;
 revoke execute on function public.decide_team_request(uuid, boolean) from public, anon;
 grant execute on function public.decide_team_request(uuid, boolean) to authenticated;
+
+-- ---------- Mise à jour 11 : catégories camp / événement club, horaire à confirmer ----------
+alter table public.events drop constraint if exists events_type_check;
+alter table public.events add constraint events_type_check
+  check (type in ('train', 'comp', 'camp', 'event'));
+alter table public.events add column if not exists no_time boolean not null default false;  -- horaire à confirmer (mis par défaut de 14h00 à 17h00)
