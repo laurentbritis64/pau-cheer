@@ -93,6 +93,11 @@ h2{font-family:var(--display);font-size:17px;font-weight:800;margin:0;text-wrap:
 .msg.annonce{max-width:100%;align-self:stretch}
 .msg.annonce .bubble{background:var(--accent-soft);border:1px solid var(--gold);border-radius:12px}
 .msg.annonce .meta{color:var(--accent);font-weight:700}
+.msg .seen{display:inline-flex;align-items:center;gap:3px;font-size:11px;color:var(--muted);padding:0 4px;border:0;background:none;font-weight:600}
+.msg .seen svg{width:14px;height:14px}
+.msg .seen.ok{color:var(--accent)}
+button.seen{cursor:pointer;text-decoration:underline dotted;text-underline-offset:2px}
+.msg .readers{font-size:12px;color:var(--muted);background:var(--surface-2);border-radius:10px;padding:6px 10px;max-width:100%}
 .composer{position:fixed;left:0;right:0;bottom:calc(58px + env(safe-area-inset-bottom,0px));z-index:4}
 .composer form{max-width:520px;margin:0 auto;display:flex;gap:8px;background:var(--bg);padding-block:8px;border-top:1px solid var(--line)}
 .composer input{flex:1;min-width:0;border:1px solid var(--line);background:var(--surface);border-radius:999px;padding:10px 14px}

@@ -51,6 +51,8 @@ function fail(e, msg) {
 }
 
 const I = {
+  check1: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
+  check2: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12.5L6.5 17 16 7.5M11 15.5l1.5 1.5L22 7.5"/></svg>',
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
   cal: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="5" width="18" height="16" rx="3"/><path d="M3 10h18M8 3v4M16 3v4"/></svg>',
   chat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M4 5h16v11H9l-5 4z"/></svg>',
@@ -121,8 +123,39 @@ const dmPair = other => [me.id, other].sort();
 function convOf(m) { return m.team_id ? "team:" + m.team_id : "dm:" + (m.dm_a === me.id ? m.dm_b : m.dm_a); }
 function msgsOf(key) { return D.msgs.filter(m => convOf(m) === key).sort((a, b) => a.created_at.localeCompare(b.created_at)); }
 function readMap() { return store.get("pau-read-" + me.id, {}); }
-function markRead(key) { const r = readMap(); r[key] = new Date().toISOString(); store.set("pau-read-" + me.id, r); }
-function unreadIn(key) { const r = readMap()[key] || "1970"; return D.msgs.filter(m => convOf(m) === key && m.sender_id !== me.id && m.created_at > r).length; }
+// Lectures enregistrées sur le serveur (pour « Vu » et « Lu par… »)
+const srvConv = key => key.startsWith("dm:") ? "dm:" + dmPair(key.slice(3)).join("_") : key;
+const tms = t => new Date(t).getTime() || 0;
+const readRow = (uid, key) => (D.reads || []).find(r => r.user_id === uid && r.conv === srvConv(key));
+function setReadRow(row) {
+  if (!D.reads) D.reads = [];
+  const i = D.reads.findIndex(r => r.user_id === row.user_id && r.conv === row.conv);
+  if (i < 0) D.reads.push(row); else if (tms(row.read_at) > tms(D.reads[i].read_at)) D.reads[i] = row;
+}
+function markRead(key) {
+  const now = new Date().toISOString(), r = readMap(); r[key] = now; store.set("pau-read-" + me.id, r);
+  // On prévient le serveur seulement s'il y a un message plus récent que la dernière lecture
+  const mine = readRow(me.id, key), last = msgsOf(key).filter(m => m.sender_id !== me.id).pop();
+  if (last && (!mine || tms(last.created_at) > tms(mine.read_at))) {
+    setReadRow({ user_id: me.id, conv: srvConv(key), read_at: now });
+    sb.rpc("mark_read", { c: srvConv(key) }).then(() => {}, () => {});
+  }
+}
+function unreadIn(key) {
+  const loc = tms(readMap()[key] || 0), srv = readRow(me.id, key), r = Math.max(loc, srv ? tms(srv.read_at) : 0);
+  return D.msgs.filter(m => convOf(m) === key && m.sender_id !== me.id && tms(m.created_at) > r).length;
+}
+// Qui a lu ce message (hors l'auteur)
+function readersOf(key, m) {
+  const c = srvConv(key);
+  return (D.reads || []).filter(r => r.conv === c && r.user_id !== m.sender_id && tms(r.read_at) >= tms(m.created_at)).map(r => r.user_id);
+}
+function seenTag(key, m) {
+  const who = readersOf(key, m);
+  if (key.startsWith("dm:")) return who.length ? `<span class="seen ok" title="Vu">${I.check2} Vu</span>` : `<span class="seen" title="Envoyé">${I.check1} Envoyé</span>`;
+  if (!who.length) return `<span class="seen">${I.check1} Envoyé</span>`;
+  return `<button class="seen ok" data-readers="${m.id}">${I.check2} Lu par ${who.length}</button>`;
+}
 // Personnes à qui je peux écrire en privé
 function dmPartners() {
   const all = Object.values(D.P).filter(p => p.id !== me.id && p.role !== "pending" && !p.managed);
@@ -191,7 +224,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
@@ -210,11 +243,12 @@ async function loadAll() {
     q(sb.from("news").select("*").order("created_at", { ascending: false }).limit(60)).catch(() => []),
     q(sb.from("profile_private").select("*")).catch(() => []),
     q(sb.from("team_requests").select("*").order("created_at", { ascending: false }).limit(300)).catch(() => []),
+    q(sb.from("chat_reads").select("*")).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs };
+  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads };
   await loadSummary();
 }
 // Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
@@ -237,6 +271,12 @@ function subscribe() {
       if (open) markRead(convOf(m));
       else if (m.sender_id !== me.id) toast((m.is_announcement ? "Annonce de " : "Message de ") + first(P(m.sender_id).full_name));
       render(open);
+    })
+    .on("postgres_changes", { event: "*", schema: "public", table: "chat_reads" }, ({ new: r }) => {
+      if (!D || !r || !r.conv) return;
+      setReadRow(r);
+      const open = S.tab === "chats" && S.view && S.view.kind === "conv" && srvConv(S.view.key) === r.conv;
+      if (open) render(true);
     })
     .subscribe();
 }
@@ -804,7 +844,7 @@ function convView(key) {
   const list = msgsOf(key);
   const body = `${note}<div class="chat">${list.map(m => {
     const a = P(m.sender_id), mine = m.sender_id === me.id;
-    return `<div class="msg ${mine && !m.is_announcement ? "me" : ""} ${m.is_announcement ? "annonce" : ""}"><span class="meta">${m.is_announcement ? "📣 Annonce du bureau · " + esc(a.full_name) : mine ? "Moi" : esc(a.full_name) + " · " + esc(roleLabel(a))} · ${fmtTs(m.created_at)}</span><div class="bubble">${m.file_path ? fileHtml(m) : ""}${m.body ? esc(m.body) : ""}</div></div>`;
+    return `<div class="msg ${mine && !m.is_announcement ? "me" : ""} ${m.is_announcement ? "annonce" : ""}"><span class="meta">${m.is_announcement ? "📣 Annonce du bureau · " + esc(a.full_name) : mine ? "Moi" : esc(a.full_name) + " · " + esc(roleLabel(a))} · ${fmtTs(m.created_at)}</span><div class="bubble">${m.file_path ? fileHtml(m) : ""}${m.body ? esc(m.body) : ""}</div>${mine ? seenTag(key, m) : ""}${mine && S.readersOpen === m.id ? `<div class="readers">${readersOf(key, m).map(u => esc(P(u).full_name)).sort().join(", ")}</div>` : ""}</div>`;
   }).join("") || `<div class="empty">Aucun message. Écris le premier !</div>`}</div>`;
   const composer = `<div class="composer"><form id="send" class="pad"><label class="btn clip" title="Joindre un document" aria-label="Joindre un document">${I.clip}<input type="file" id="chatfile" hidden accept="image/*,.pdf,.doc,.docx"></label><input id="msg" autocomplete="off" placeholder="Écrire un message…" aria-label="Message"><button class="btn">Envoyer</button></form></div>`;
   return { title, body, composer };
@@ -1250,6 +1290,7 @@ function bind() {
     try { for (const c of chunks(ids)) await q(sb.from("events").delete().in("id", c).select());
       D.events = D.events.filter(x => !ids.includes(x.id)); S.confirm = null; render(0); toast(`${ids.length} entraînements supprimés`); } catch (e) { fail(e); }
   });
+  on("[data-readers]", b => { S.readersOpen = S.readersOpen === b.dataset.readers ? null : b.dataset.readers; render(true); });
   on("[data-open]", async b => { try { const u = await signedUrl(b.dataset.open); window.open(u, "_blank", "noopener"); } catch (e) { fail(e, "Impossible d'ouvrir ce fichier."); } });
   on("[data-packfor]", b => { S.packFor = b.dataset.packfor; render(0); });
   on("[data-docfor]", b => { S.docFor = b.dataset.docfor; render(); window.scrollTo(0, 0); });
