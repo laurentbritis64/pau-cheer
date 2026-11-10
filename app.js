@@ -326,6 +326,7 @@ function render(keepBottom) {
       if (v && v.kind === "annonce") { title = "Annonce"; body = annonceView(); back = () => go("bureau"); }
       else if (v && v.kind === "addEvent") { title = "Ajouter au planning"; body = addEventView(); back = () => go("bureau"); }
       else if (v && v.kind === "member") { title = "Fiche membre"; body = memberView(v.id); back = () => go("bureau"); }
+      else if (v && v.kind === "dups") { title = "Enfants en double"; body = dupsView(); back = () => go("bureau"); }
       else { title = "Espace bureau"; body = bureauView(); back = () => go("home"); }
     }
   } catch (e) { console.error(e); body = `<div class="empty">Cette page n'a pas pu s'afficher.</div>`; }
@@ -1112,6 +1113,49 @@ async function uploadDoc(aid, type, file) {
 }
 
 /* ============ Bureau ============ */
+/* Doublons : un même enfant saisi deux fois */
+const plainName = t => (t || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[-']/g, " ").replace(/\s+/g, " ").trim();
+const kidLike = p => p.role !== "parent" && (isAth(p) || p.managed || (p.role === "pending" && p.wish === "athlete"));
+function looksSame(a, b) {
+  const x = plainName(a.full_name).split(" "), y = plainName(b.full_name).split(" ");
+  if (x.join(" ") === y.join(" ") || x.slice().reverse().join(" ") === y.join(" ")) return true;
+  if (x[0] !== y[0] || x[0].length < 2) return false;
+  const rx = x.slice(1).join(" "), ry = y.slice(1).join(" ");
+  if (a.birth_date && a.birth_date === b.birth_date) return true;
+  if (!rx || !ry) return false;
+  return rx.startsWith(ry) || ry.startsWith(rx) || rx.slice(0, 3) === ry.slice(0, 3);
+}
+function dupPairs() {
+  const ign = store.get("pau-notdup", []), l = Object.values(D.P).filter(kidLike), out = [];
+  for (let i = 0; i < l.length; i++) for (let j = i + 1; j < l.length; j++)
+    if (looksSame(l[i], l[j]) && !ign.includes([l[i].id, l[j].id].sort().join("|"))) out.push([l[i], l[j]]);
+  return out;
+}
+function dupCard(p) {
+  return `<div class="stack" style="gap:4px;flex:1;min-width:140px"><div class="row" style="gap:8px">${avatar(p, 36)}<b>${esc(p.full_name)}</b></div>
+    <span class="muted" style="font-size:12.5px">${p.team_id ? esc(T(p.team_id).name) : "Sans équipe"}${p.birth_date ? " · né·e le " + fmtDate(p.birth_date + "T12:00:00") : " · date de naissance inconnue"}<br>
+    ${p.managed ? "Sans compte" : "A son propre compte"}${p.role === "pending" ? " · en attente" : ""} · parents : ${parentsOf(p.id).map(x => esc(first(x.full_name))).join(", ") || "aucun"}</span></div>`;
+}
+function mergeConfirm(keep, dup) {
+  return `<div class="stack" style="gap:8px;border:1px solid var(--gold);border-radius:12px;padding:10px 12px;background:var(--accent-soft)">
+    <span style="font-size:13.5px">On garde <b>${esc(keep.full_name)}</b>${keep.team_id ? " (" + esc(T(keep.team_id).name) + ")" : ""}. La fiche <b>${esc(dup.full_name)}</b> est supprimée : ses parents, absences, documents et inscriptions aux déplacements passent sur la fiche gardée, et les informations manquantes sont complétées.</span>
+    <div class="row" style="gap:8px;flex-wrap:wrap"><button type="button" class="btn small" data-merge="${keep.id}|${dup.id}">Fusionner</button><button type="button" class="btn small ghost" data-mergepick="">Annuler</button></div></div>`;
+}
+function dupsView() {
+  const pairs = dupPairs(), pick = S.mergePick || "", kids = Object.values(D.P).filter(kidLike).sort((a, b) => a.full_name.localeCompare(b.full_name));
+  const opts = sel => kids.map(a => `<option value="${a.id}" ${sel === a.id ? "selected" : ""}>${esc(a.full_name)}${a.team_id ? " · " + esc(T(a.team_id).name) : ""}${a.birth_date ? " · " + a.birth_date.split("-").reverse().join("/") : ""}</option>`).join("");
+  const mk = S.mergeManual || {};
+  return `<p class="muted" style="margin:0;font-size:13.5px">Un enfant saisi deux fois (par chaque parent, ou avec une faute dans le nom) : choisis la fiche à garder, l'autre est fusionnée dedans.</p>
+    ${pairs.length ? pairs.map(([a, b]) => { const key = a.id + "|" + b.id;
+      return `<div class="card stack"><div class="row" style="gap:12px;flex-wrap:wrap;align-items:flex-start">${dupCard(a)}${dupCard(b)}</div>
+        ${pick === a.id + ">" + b.id ? mergeConfirm(a, b) : pick === b.id + ">" + a.id ? mergeConfirm(b, a)
+        : `<div class="row" style="gap:6px;flex-wrap:wrap"><button type="button" class="btn small" data-mergepick="${a.id}>${b.id}">Garder la 1re</button><button type="button" class="btn small" data-mergepick="${b.id}>${a.id}">Garder la 2e</button><button type="button" class="btn small ghost" data-notdup="${key}">Pas un doublon</button></div>`}</div>`; }).join("")
+      : `<div class="empty">Aucun doublon repéré automatiquement.</div>`}
+    <div class="card stack"><h2>Fusionner deux fiches au choix</h2>
+      <label class="field">Fiche à garder<select id="mgKeep"><option value="">Choisir…</option>${opts(mk.keep)}</select></label>
+      <label class="field">Doublon à supprimer<select id="mgDup"><option value="">Choisir…</option>${opts(mk.dup)}</select></label>
+      ${mk.keep && mk.dup && pick === mk.keep + ">" + mk.dup ? mergeConfirm(P(mk.keep), P(mk.dup)) : `<button type="button" class="btn small" data-mergemanual style="align-self:flex-start">Continuer</button>`}</div>`;
+}
 function bureauView() {
   const qs = (S.q || "").toLowerCase();
   const all = Object.values(D.P).filter(p => p.id !== me.id);
@@ -1129,6 +1173,7 @@ function bureauView() {
       <button class="card" data-goview="annonce" style="text-align:left;display:flex;flex-direction:column;gap:6px;border-color:var(--gold)"><span style="color:var(--accent)">${I.mega}</span><b>Annonce à toutes les équipes</b><span class="muted" style="font-size:13px">Publiée dans chaque tchat d'équipe</span></button>
       <button class="card" data-goview="addEvent" style="text-align:left;display:flex;flex-direction:column;gap:6px"><span style="color:var(--accent)">${I.cal}</span><b>Ajouter au planning</b><span class="muted" style="font-size:13px">Entraînement ou compétition</span></button>
     </div>
+    ${(() => { const n = dupPairs().length; return `<button class="card" data-goview="dups" style="text-align:left;display:flex;gap:10px;align-items:center${n ? ";border-color:var(--gold)" : ""}"><span style="color:var(--accent)">${I.user}</span><span style="flex:1"><b>Enfants en double</b><br><span class="muted" style="font-size:13px">${n ? n + " doublon" + (n > 1 ? "s" : "") + " possible" + (n > 1 ? "s" : "") + " à vérifier" : "Fusionner deux fiches d'un même enfant"}</span></span><span class="muted">›</span></button>`; })()}
     <div class="eyebrow">Membres du club · touche un nom pour lui écrire</div>
     <input class="search" id="q" placeholder="Rechercher un nom…" aria-label="Rechercher">
     ${groups.map(([g, l]) => { l = l.filter(p => p.full_name.toLowerCase().includes(qs)); if (!l.length) return "";
@@ -1171,6 +1216,7 @@ function memberView(id) {
     ${role === "athlete" ? `<p class="muted" style="margin:0;font-size:13px">Parents reliés : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun pour l'instant (à faire depuis la fiche du parent)"}.</p>` : ""}
     <button class="btn">Enregistrer</button>
     ${p.managed ? "" : `<button type="button" class="btn ghost" data-conv="dm:${id}">Envoyer un message privé</button>`}
+    ${kidLike(p) ? `<button type="button" class="btn ghost" data-mergefrom="${id}">Fusionner avec une fiche en double</button>` : ""}
   </form>`;
 }
 
@@ -1277,6 +1323,15 @@ function bind() {
       D.teamReqs = [r].concat(D.teamReqs || []); render(0); toast("Demande envoyée au coach"); } catch (e) { fail(e); } });
   on("[data-cancelreq]", async b => { try { await q(sb.from("team_requests").update({ status: "cancelled" }).eq("id", b.dataset.cancelreq).select());
       D.teamReqs = (D.teamReqs || []).map(r => r.id === b.dataset.cancelreq ? { ...r, status: "cancelled" } : r); render(0); toast("Demande annulée"); } catch (e) { fail(e); } });
+  on("[data-mergepick]", b => { S.mergePick = b.dataset.mergepick; render(0); });
+  on("[data-notdup]", b => { const l = store.get("pau-notdup", []); l.push(b.dataset.notdup.split("|").sort().join("|")); store.set("pau-notdup", l); render(0); });
+  on("[data-mergefrom]", b => { S.mergeManual = { keep: b.dataset.mergefrom }; S.mergePick = ""; go("bureau", { kind: "dups" }); });
+  on("[data-mergemanual]", () => { const k = val("mgKeep"), d = val("mgDup"); S.mergeManual = { keep: k, dup: d };
+    if (!k || !d) return toast("Choisis les deux fiches."); if (k === d) return toast("Choisis deux fiches différentes.");
+    S.mergePick = k + ">" + d; render(0); });
+  on("[data-merge]", async b => { const [k, d] = b.dataset.merge.split("|"), name = P(d).full_name;
+    try { await q(sb.rpc("merge_profiles", { keep: k, dup: d })); S.mergePick = ""; S.mergeManual = null; await loadAll(); render(0); toast("Fiches fusionnées : " + name + " a été rattaché·e à " + P(k).full_name); }
+    catch (e) { fail(e, e && e.message && /compte|bureau|athlètes|différentes/.test(e.message) ? e.message : "La fusion n'a pas marché. La base est-elle à jour (mise à jour 14) ?"); } });
   on("[data-askrmkid]", b => { S.rmKid = b.dataset.askrmkid || null; render(0); });
   on("[data-rmkid]", async b => {
     const c = P(b.dataset.rmkid);
