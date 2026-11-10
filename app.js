@@ -224,7 +224,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
@@ -244,11 +244,12 @@ async function loadAll() {
     q(sb.from("profile_private").select("*")).catch(() => []),
     q(sb.from("team_requests").select("*").order("created_at", { ascending: false }).limit(300)).catch(() => []),
     q(sb.from("chat_reads").select("*")).catch(() => []),
+    q(sb.from("link_requests").select("*").eq("status", "pending")).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads };
+  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs };
   await loadSummary();
 }
 // Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
@@ -499,7 +500,15 @@ function teamReqBlock(a) {
   return `<div class="field">Demander un changement d'équipe<div class="row" style="gap:6px"><select class="search" data-reqteam="${a.id}" style="flex:1;min-width:0;padding:7px 10px"><option value="">Choisir la nouvelle équipe…</option>${D.teams.filter(t => t.id !== a.team_id).map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select><button type="button" class="btn small" data-sendreq="${a.id}">Demander</button></div>
     <span class="muted" style="font-size:12.5px;font-weight:400">Le coach de la nouvelle équipe accepte ou refuse.</span></div>`;
 }
-function reqsCard() {
+function reqsCard() { return teamReqsCard() + linkReqsCard(); }
+function linkReqsCard() {
+  const l = isBureau() ? (D.linkReqs || []).filter(r => r.status === "pending") : []; if (!l.length) return "";
+  return `<div class="card stack" style="border-color:var(--gold)"><h2>Parents à relier à un enfant</h2>
+    ${l.map(r => { const a = P(r.athlete_id), others = parentsOf(a.id);
+      return `<div class="row" style="gap:8px;flex-wrap:wrap">${avatar(a, 32)}<span style="flex:1;min-width:140px"><b>${esc(P(r.parent_id).full_name)}</b> dit être le parent de <b>${esc(a.full_name)}</b><br><span class="muted" style="font-size:13px">${a.team_id ? esc(T(a.team_id).name) : "Sans équipe"}${a.birth_date ? " · né·e le " + fmtDate(a.birth_date + "T12:00:00") : ""}${others.length ? " · déjà relié à " + others.map(x => esc(x.full_name)).join(", ") : ""}</span></span>
+      <button class="btn small" data-linkdecide="${r.id}|1">Relier</button><button class="btn small ghost" data-linkdecide="${r.id}|0">Refuser</button></div>`; }).join("")}</div>`;
+}
+function teamReqsCard() {
   const l = reqsToDecide(); if (!l.length) return "";
   return `<div class="card stack" style="border-color:var(--gold)"><h2>Demandes de changement d'équipe</h2>
     ${l.map(r => `<div class="row" style="gap:8px;flex-wrap:wrap">${avatar(P(r.athlete_id), 32)}<span style="flex:1;min-width:140px"><b>${esc(P(r.athlete_id).full_name)}</b><br><span class="muted" style="font-size:13px">${r.from_team ? esc(T(r.from_team).name) : "Sans équipe"} → ${esc(T(r.to_team).name)} · demandé par ${esc(first(P(r.requested_by).full_name))}</span></span>
@@ -516,18 +525,36 @@ function teamsManageView() {
       <select class="search" data-move="${a.id}" style="max-width:150px;padding:7px 10px">${D.teams.map(x => `<option value="${x.id}" ${x.id === a.team_id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}<option value="">Sans équipe</option></select></div>`).join("")}</div>` : ""; }).join("") || `<div class="empty">Aucun athlète dans tes équipes.</div>`}
     <button class="btn" data-savemoves>Enregistrer les changements</button>`;
 }
+// Retirer un enfant ajouté par erreur
+const kidWillBeDeleted = c => c.managed && parentsOf(c.id).every(x => x.id === me.id);
+const removeKidBtn = c => `<button type="button" class="btn small ghost" data-askrmkid="${c.id}">${kidWillBeDeleted(c) ? "Supprimer cet enfant" : "Retirer de mon compte"}</button>`;
+function removeKidConfirm(c) {
+  if (S.rmKid !== c.id) return "";
+  return `<div class="stack" style="gap:8px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface-2)">
+    <span style="font-size:13.5px">${kidWillBeDeleted(c) ? `<b>Supprimer ${esc(c.full_name)} ?</b> Sa fiche, ses absences et sa photo seront effacées.` : `<b>Retirer ${esc(c.full_name)} de ton compte ?</b> ${parentsOf(c.id).some(x => x.id !== me.id) ? "Son autre parent le garde." : "Son propre compte n'est pas supprimé."}`}</span>
+    <div class="row" style="gap:8px"><button type="button" class="btn small" data-rmkid="${c.id}" style="background:#c43c3c;color:#fff">Oui, ${kidWillBeDeleted(c) ? "supprimer" : "retirer"}</button><button type="button" class="btn small ghost" data-askrmkid="">Annuler</button></div></div>`;
+}
 // « Mes enfants » : pour tout membre (un membre du bureau ou un coach peut aussi être parent)
 function myKidsCard() {
   if (me.role === "pending") return "";
   const pend = D.links.filter(l => l.parent_id === me.id).map(l => P(l.athlete_id)).filter(c => c.role === "pending");
   const others = isBureau() ? athletes().filter(a => a.id !== me.id && !D.links.some(l => l.parent_id === me.id && l.athlete_id === a.id)) : [];
+  const asked = (D.linkReqs || []).filter(r => r.parent_id === me.id && r.status === "pending");
+  const mk = S.mk || {}, matches = S.kidMatches || [];
   return `<div class="card stack"><h2>${childrenOf(me.id).length ? "Ajouter un autre enfant" : "Mes enfants au club"}</h2>
-    ${pend.map(c => `<div class="row" style="gap:8px">${avatar(c, 32)}<span style="flex:1">${esc(c.full_name)}</span><span class="tag warn">en attente du bureau</span></div>`).join("")}
-    <div class="grid2"><label class="field">Prénom<input id="mkFirst"></label><label class="field">Nom<input id="mkLast" value="${esc(splitName(me.full_name)[1])}"></label></div>
-    <div class="grid2"><label class="field">Date de naissance<input id="mkBirth" type="date"></label><label class="field">Équipe<select id="mkTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></label></div>
-    <div class="field">Sexe${genderPick("mkGender", null, true)}</div>
-    <button type="button" class="btn small" data-addmykid style="align-self:flex-start">Ajouter mon enfant</button>
-    ${isBureau() ? "" : `<p class="muted" style="margin:0;font-size:12.5px">Le bureau valide l'ajout. Si ton enfant est déjà inscrit (par l'autre parent), demande au bureau de te relier à lui.</p>`}
+    ${pend.map(c => `<div class="row" style="gap:8px;flex-wrap:wrap">${avatar(c, 32)}<span style="flex:1">${esc(c.full_name)}</span><span class="tag warn">en attente du bureau</span>${removeKidBtn(c)}</div>${removeKidConfirm(c)}`).join("")}
+    ${asked.map(r => `<div class="row" style="gap:8px;flex-wrap:wrap">${avatar(P(r.athlete_id), 32)}<span style="flex:1">${esc(P(r.athlete_id).full_name)}</span><span class="tag warn">demande envoyée au bureau</span><button type="button" class="link" data-linkdecide="${r.id}|0">Annuler</button></div>`).join("")}
+    <div class="grid2"><label class="field">Prénom<input id="mkFirst" value="${esc(mk.first || "")}"></label><label class="field">Nom<input id="mkLast" value="${esc(mk.last != null ? mk.last : splitName(me.full_name)[1])}"></label></div>
+    <div class="grid2"><label class="field">Date de naissance<input id="mkBirth" type="date" value="${esc(mk.birth || "")}"></label><label class="field">Équipe<select id="mkTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}" ${mk.team === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label></div>
+    <div class="field">Sexe${genderPick("mkGender", mk.gender || null, true)}</div>
+    ${matches.length ? `<div class="stack" style="gap:8px;border:1px solid var(--gold);border-radius:12px;padding:10px 12px;background:var(--accent-soft)">
+      <b style="font-size:14px">Cet enfant est peut-être déjà inscrit :</b>
+      ${matches.map(m => `<div class="row" style="gap:8px;flex-wrap:wrap">${avatar(P(m.id).id ? P(m.id) : { full_name: m.full_name }, 32)}<span style="flex:1;min-width:140px"><b>${esc(m.full_name)}</b><br><span class="muted" style="font-size:12.5px">${m.team_id ? esc(T(m.team_id).name) : "Sans équipe"}${m.birth_date ? " · né·e le " + fmtDate(m.birth_date + "T12:00:00") : ""}</span>
+        ${m.same_birth ? '<span class="tag ok">même date de naissance</span> ' : ""}${m.same_team ? '<span class="tag ok">même équipe</span>' : ""}</span>
+        <button type="button" class="btn small" data-claimkid="${m.id}">C'est mon enfant</button></div>`).join("")}
+      <button type="button" class="btn small ghost" data-addmykid="force" style="align-self:flex-start">Non, c'est un autre enfant : l'ajouter</button></div>`
+    : `<button type="button" class="btn small" data-addmykid style="align-self:flex-start">Ajouter mon enfant</button>`}
+    ${isBureau() ? "" : `<p class="muted" style="margin:0;font-size:12.5px">Le bureau valide l'ajout. Si ton enfant est déjà inscrit (par l'autre parent par exemple), l'appli te le propose.</p>`}
     ${others.length ? `<div class="field">Ou relier un athlète déjà inscrit<div class="row" style="gap:6px"><select class="search" id="mkLink" style="flex:1;min-width:0;padding:7px 10px"><option value="">Choisir…</option>${others.map(a => `<option value="${a.id}">${esc(a.full_name)}${a.team_id ? " · " + esc(T(a.team_id).name) : ""}</option>`).join("")}</select><button type="button" class="btn small" data-linkmykid>Relier</button></div></div>` : ""}
   </div>`;
 }
@@ -554,7 +581,7 @@ function accountView() {
       <div class="grid2"><label class="field">Nom<input name="kEmName" value="${esc(PV(c.id).emergency_name || "")}"></label><label class="field">Téléphone<input name="kEmPhone" type="tel" value="${esc(PV(c.id).emergency_phone || "")}"></label></div>
       ${c.role === "athlete" || isAth(c) ? teamReqBlock(c) : ""}
       <span class="muted" style="font-size:12.5px">Autre(s) parent(s) : ${parentsOf(c.id).filter(x => x.id !== me.id).map(x => esc(x.full_name) + (isLegal(x.id, c.id) ? " (responsable légal)" : "")).join(", ") || "aucun dans l'app"}</span>
-      <button class="btn small" style="align-self:flex-start">Enregistrer</button></form>`).join("") : ""}
+      <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn small">Enregistrer</button>${removeKidBtn(c)}</div>${removeKidConfirm(c)}</form>`).join("") : ""}
     ${me.role === "athlete" ? `<div class="card stack"><h2>Mon équipe : ${me.team_id ? esc(T(me.team_id).name) : "aucune"}</h2>${teamReqBlock(me)}</div>` : ""}
     ${myKidsCard()}
     <form id="passForm" class="card stack"><h2>Changer de mot de passe</h2><label class="field">Nouveau mot de passe<input id="accPass" type="password" minlength="8" autocomplete="new-password" required></label><button class="btn small" style="align-self:flex-start">Changer</button></form>
@@ -1250,12 +1277,35 @@ function bind() {
       D.teamReqs = [r].concat(D.teamReqs || []); render(0); toast("Demande envoyée au coach"); } catch (e) { fail(e); } });
   on("[data-cancelreq]", async b => { try { await q(sb.from("team_requests").update({ status: "cancelled" }).eq("id", b.dataset.cancelreq).select());
       D.teamReqs = (D.teamReqs || []).map(r => r.id === b.dataset.cancelreq ? { ...r, status: "cancelled" } : r); render(0); toast("Demande annulée"); } catch (e) { fail(e); } });
-  on("[data-addmykid]", async () => {
+  on("[data-askrmkid]", b => { S.rmKid = b.dataset.askrmkid || null; render(0); });
+  on("[data-rmkid]", async b => {
+    const c = P(b.dataset.rmkid);
+    try { const r = await q(sb.rpc("remove_child", { a: c.id })); S.rmKid = null;
+      await loadAll(); render(0); toast(r === "deleted" ? c.full_name + " a été supprimé·e" : c.full_name + " est retiré·e de ton compte"); }
+    catch (e) { fail(e, "Impossible de retirer l'enfant. La base est-elle à jour (mise à jour 13) ?"); }
+  });
+  on("[data-linkdecide]", async b => { const [id, ok] = b.dataset.linkdecide.split("|");
+    try { await q(sb.rpc("decide_link_request", { r: id, ok: ok === "1" })); await loadAll(); render(0);
+      toast(ok === "1" ? "Parent relié à l'enfant" : "Demande retirée"); } catch (e) { fail(e); } });
+  on("[data-claimkid]", async b => {
+    try { const r = await q(sb.rpc("request_link", { a: b.dataset.claimkid })); S.mk = null; S.kidMatches = null;
+      await loadAll(); render(0); toast(r === "linked" ? "Enfant relié à ton compte" : "Demande envoyée au bureau : il va te relier à ton enfant"); } catch (e) { fail(e); }
+  });
+  on("[data-addmykid]", async b => {
     const g = id => (document.getElementById(id) || {}).value || "";
+    const gd0 = $app.querySelector("[name=mkGender]:checked");
+    S.mk = { first: g("mkFirst"), last: g("mkLast"), birth: g("mkBirth"), team: g("mkTeam"), gender: gd0 ? gd0.value : null };
     if (!g("mkFirst").trim() || !g("mkLast").trim()) return toast("Indique le prénom et le nom de ton enfant.");
+    // Contrôle : un enfant qui ressemble est-il déjà inscrit ?
+    if (b.dataset.addmykid !== "force") {
+      let found = [];
+      try { found = (await q(sb.rpc("similar_children", { p_first: g("mkFirst"), p_last: g("mkLast"), p_birth: g("mkBirth") || null, p_team: g("mkTeam") || null }))) || []; } catch (e) { found = []; }
+      if (found.length) { S.kidMatches = found; render(0); return; }
+    }
+    S.kidMatches = null;
     try { const cid = await q(sb.rpc("add_child", { p_parent: me.id, p_first: g("mkFirst"), p_last: g("mkLast"), p_birth: g("mkBirth") || null, p_team: g("mkTeam") || null }));
       const gd = $app.querySelector("[name=mkGender]:checked"); if (cid && gd) await savePriv(cid, { gender: gd.value }).catch(() => {});
-      await loadAll(); render(0); toast(isBureau() ? "Enfant ajouté" : "Enfant ajouté : le bureau va valider"); } catch (e) { fail(e, e && /déjà inscrit/.test(e.message || "") ? "Cet enfant est déjà inscrit : demande au bureau de te relier à lui." : undefined); }
+      S.mk = null; await loadAll(); render(0); toast(isBureau() ? "Enfant ajouté" : "Enfant ajouté : le bureau va valider"); } catch (e) { fail(e, e && /déjà inscrit/.test(e.message || "") ? "Cet enfant est déjà inscrit : demande au bureau de te relier à lui." : undefined); }
   });
   on("[data-linkmykid]", async () => {
     const a = (document.getElementById("mkLink") || {}).value; if (!a) return toast("Choisis l'athlète.");
