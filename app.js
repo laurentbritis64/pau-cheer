@@ -606,6 +606,7 @@ function homeView() {
       ${isBureau() ? tile('data-tab="bureau"', pending, "compte" + (pending > 1 ? "s" : "") + " à valider · Espace bureau", pending > 0)
         : myAthletes().length ? tile('data-tab="docs"', missing, "document" + (missing > 1 ? "s" : "") + " à envoyer", missing > 0) : tile('data-tab="planning"', next.length, "prochains rendez-vous", false)}
     </div>
+    ${isBureau() ? (() => { const nd = dupPairs().length; return `<button class="card" data-tab="bureau" style="text-align:left;display:flex;gap:12px;align-items:center;border-color:var(--gold)"><span style="color:var(--accent);width:26px;height:26px;display:flex">${I.user}</span><span style="flex:1"><b style="font-size:16px">Espace bureau</b><br><span class="muted" style="font-size:13px">Membres, comptes à valider, enfants en double${nd ? ` (<b style="color:var(--accent)">${nd}</b>)` : ""}, annonces</span></span><span style="font-size:20px;color:var(--accent)">›</span></button>`; })() : ""}
     ${reqsCard()}
     ${next.length ? `<div class="card stack"><div class="row" style="justify-content:space-between"><h2>À venir</h2><button class="link" data-tab="planning">Tout le planning</button></div>
       ${next.map(e => `<div class="row" style="gap:10px;align-items:flex-start"><span style="width:84px;flex:none;font-size:13px;font-weight:700;text-transform:capitalize;white-space:nowrap">${fmtShort(e.date).replace(/\.$/, "")}</span>
