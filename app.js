@@ -1137,9 +1137,28 @@ function dupCard(p) {
     <span class="muted" style="font-size:12.5px">${p.team_id ? esc(T(p.team_id).name) : "Sans équipe"}${p.birth_date ? " · né·e le " + fmtDate(p.birth_date + "T12:00:00") : " · date de naissance inconnue"}<br>
     ${p.managed ? "Sans compte" : "A son propre compte"}${p.role === "pending" ? " · en attente" : ""} · parents : ${parentsOf(p.id).map(x => esc(first(x.full_name))).join(", ") || "aucun"}</span></div>`;
 }
+// Ce que le doublon apporte à la fiche gardée (informations qui manquent)
+function mergeGains(k, d) {
+  const out = [], pk = PV(k.id), pd = PV(d.id), nk = plainName(k.full_name), nd = plainName(d.full_name);
+  if (!nk || (nd.length > nk.length && nd.startsWith(nk))) out.push("nom complet : " + esc(d.full_name));
+  if (!k.birth_date && d.birth_date) out.push("date de naissance : " + fmtDate(d.birth_date + "T12:00:00"));
+  if (!k.team_id && d.team_id) out.push("équipe : " + esc(T(d.team_id).name));
+  if (!k.photo_path && d.photo_path) out.push("photo");
+  if (!pk.gender && pd.gender) out.push("sexe");
+  if (!pk.phone && pd.phone) out.push("téléphone");
+  if (!pk.emergency_name && pd.emergency_name) out.push("contact d'urgence : " + esc(pd.emergency_name));
+  if (!pk.emergency_phone && pd.emergency_phone) out.push("téléphone d'urgence");
+  if (pk.image_consent == null && pd.image_consent != null) out.push("droit à l'image : " + (pd.image_consent ? "accepte" : "refuse"));
+  else if (pk.image_consent === true && pd.image_consent === false) out.push("droit à l'image : refuse (le refus l'emporte)");
+  const np = parentsOf(d.id).filter(x => !parentsOf(k.id).some(y => y.id === x.id));
+  if (np.length) out.push("parent" + (np.length > 1 ? "s" : "") + " : " + np.map(x => esc(x.full_name)).join(", "));
+  return out;
+}
 function mergeConfirm(keep, dup) {
+  const g = mergeGains(keep, dup);
   return `<div class="stack" style="gap:8px;border:1px solid var(--gold);border-radius:12px;padding:10px 12px;background:var(--accent-soft)">
-    <span style="font-size:13.5px">On garde <b>${esc(keep.full_name)}</b>${keep.team_id ? " (" + esc(T(keep.team_id).name) + ")" : ""}. La fiche <b>${esc(dup.full_name)}</b> est supprimée : ses parents, absences, documents et inscriptions aux déplacements passent sur la fiche gardée, et les informations manquantes sont complétées.</span>
+    <span style="font-size:13.5px">On garde <b>${esc(keep.full_name)}</b>${keep.team_id ? " (" + esc(T(keep.team_id).name) + ")" : ""}. La fiche <b>${esc(dup.full_name)}</b> est supprimée : ses absences, documents et inscriptions aux déplacements passent sur la fiche gardée.</span>
+    <span style="font-size:13.5px">${g.length ? `<b>Ajouté à la fiche gardée :</b><br>• ${g.join("<br>• ")}` : "Rien ne manque sur la fiche gardée."}</span>
     <div class="row" style="gap:8px;flex-wrap:wrap"><button type="button" class="btn small" data-merge="${keep.id}|${dup.id}">Fusionner</button><button type="button" class="btn small ghost" data-mergepick="">Annuler</button></div></div>`;
 }
 function dupsView() {

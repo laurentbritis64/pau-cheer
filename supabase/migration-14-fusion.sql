@@ -1,6 +1,7 @@
 -- =====================================================================
 -- Mise à jour 14 : le bureau fusionne deux fiches d'un même enfant saisi en double
 -- À coller dans Supabase > SQL Editor > New query > Run (après la mise à jour 13)
+-- Peut être relancée sans risque.
 -- =====================================================================
 
 -- Fiches fusionnées : les photos et documents rangés sous l'ancienne fiche restent accessibles
@@ -65,6 +66,12 @@ begin
 
   -- Fiche
   update profiles set
+    -- nom saisi en partie (« Chloé Dub ») : on prend le nom complet du doublon
+    full_name  = case when trim(k.full_name) = '' then d.full_name
+                      when length(plain(d.full_name)) > length(plain(k.full_name))
+                       and plain(d.full_name) like plain(k.full_name) || '%' then d.full_name
+                      else k.full_name end,
+    title      = coalesce(nullif(k.title, ''), d.title),
     birth_date = coalesce(k.birth_date, d.birth_date),
     team_id    = coalesce(k.team_id, d.team_id),
     photo_path = coalesce(k.photo_path, d.photo_path),
@@ -74,6 +81,7 @@ begin
   -- Coordonnées : on complète ce qui manque ; en cas de désaccord sur l'image, le refus l'emporte
   insert into profile_private (id) values (keep) on conflict (id) do nothing;
   update profile_private p set
+    email           = coalesce(nullif(p.email, ''), x.email),
     gender          = coalesce(p.gender, x.gender),
     phone           = case when p.phone = '' then x.phone else p.phone end,
     emergency_name  = case when p.emergency_name = '' then x.emergency_name else p.emergency_name end,
