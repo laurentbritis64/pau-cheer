@@ -1540,3 +1540,7 @@ $$;
 drop policy if exists attendance_read on public.attendance;
 create policy attendance_read on public.attendance for select to authenticated
   using (can_act_for(athlete_id) or is_coach_of(athlete_id) or is_coach_absence_visible(event_id, athlete_id));
+
+-- ---------- Mise à jour 16 : supprimer un message pour moi ----------
+-- Messages masqués pour moi seulement, conversation par conversation
+alter table public.chat_prefs add column if not exists hidden uuid[] not null default '{}';

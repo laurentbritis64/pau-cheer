@@ -126,11 +126,12 @@ function convOf(m) { return m.team_id ? "team:" + m.team_id : "dm:" + (m.dm_a ==
 // Préférences de chacun : conversation archivée, ou vidée « pour moi »
 const prefOf = key => (D.prefs || []).find(p => p.user_id === me.id && p.conv === srvConv(key)) || {};
 const clearedAt = key => prefOf(key).cleared_at ? tms(prefOf(key).cleared_at) : 0;
-function msgsOf(key) { const c = clearedAt(key); return D.msgs.filter(m => convOf(m) === key && (!c || tms(m.created_at) > c)).sort((a, b) => a.created_at.localeCompare(b.created_at)); }
+function msgsOf(key) { const c = clearedAt(key), h = prefOf(key).hidden || []; return D.msgs.filter(m => convOf(m) === key && (!c || tms(m.created_at) > c) && !h.includes(m.id)).sort((a, b) => a.created_at.localeCompare(b.created_at)); }
 function isArchived(key) { const a = prefOf(key).archived_at; if (!a) return false; const l = lastOf(key); return !l || tms(l.created_at) <= tms(a); }
 const canWipe = key => key.startsWith("dm:") || isBureau() || (me.role === "coach" && coachTeamsOf(me.id).includes(key.slice(5)));
 async function savePref(key, patch) {
   const cur = prefOf(key), row = { user_id: me.id, conv: srvConv(key), archived_at: cur.archived_at || null, cleared_at: cur.cleared_at || null, ...patch };
+  if (cur.hidden && cur.hidden.length && !("hidden" in patch)) row.hidden = cur.hidden;
   const [res] = await q(sb.from("chat_prefs").upsert(row).select());
   D.prefs = (D.prefs || []).filter(p => !(p.user_id === me.id && p.conv === row.conv)).concat([res || row]);
 }
@@ -891,6 +892,14 @@ function fileHtml(f) {
   const img = (f.file_type || "").startsWith("image/");
   return `${img ? `<img class="thumb" data-path="${esc(f.file_path)}" alt="">` : ""}<button class="file" data-open="${esc(f.file_path)}" style="border:0;background:none;padding:0;color:inherit;text-align:left"><span class="fi">${I.doc}</span><span style="min-width:0"><span class="fn">${esc(f.file_name)}</span><small>${fmtSize(f.file_size)} · ouvrir</small></span></button>`;
 }
+// Menu d'un message (toucher la bulle) : supprimer pour moi / pour tout le monde
+function msgMenu(key, m) {
+  const all = m.sender_id === me.id || isBureau();
+  return `<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:2px;justify-content:${m.sender_id === me.id ? "flex-end" : "flex-start"}">
+    <button type="button" class="btn small ghost" data-delmsg="${m.id}|me">Supprimer pour moi</button>
+    ${all ? `<button type="button" class="btn small" data-delmsg="${m.id}|all" style="background:#c43c3c;color:#fff">Supprimer pour tout le monde</button>` : ""}
+    <button type="button" class="btn small ghost" data-msgmenu="">Annuler</button></div>`;
+}
 function convView(key) {
   const [type, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
   let title, note;
@@ -904,13 +913,14 @@ function convView(key) {
       <button type="button" class="btn small ghost" data-convarch="${key}">${isArchived(key) || prefOf(key).archived_at && !list.length ? "📤 Désarchiver" : "🗄️ Archiver"}</button>
       <button type="button" class="btn small ghost" data-convask="${key}|clear">🧹 Supprimer pour moi</button>
       ${canWipe(key) ? `<button type="button" class="btn small ghost" data-convask="${key}|wipe">🗑️ Supprimer pour tout le monde</button>` : ""}</div>
+    <span class="muted" style="font-size:12.5px">Touche un message pour le supprimer.</span>
     ${ask ? `<div class="stack" style="gap:8px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface-2)">
       <span style="font-size:13.5px">${ask === "clear" ? "<b>Vider cette conversation pour toi ?</b> Les messages actuels disparaissent seulement de ton téléphone et de ton compte. Les autres les voient toujours."
         : `<b>Supprimer tous les messages pour tout le monde ?</b> ${key.startsWith("team:") ? "Toute l'équipe" : "L'autre personne"} ne les verra plus non plus, et les fichiers joints sont effacés. C'est définitif.`}</span>
       <div class="row" style="gap:8px"><button type="button" class="btn small" data-convdo="${key}|${ask}" style="${ask === "wipe" ? "background:#c43c3c;color:#fff" : ""}">${ask === "clear" ? "Vider pour moi" : "Supprimer pour tout le monde"}</button><button type="button" class="btn small ghost" data-convask="">Annuler</button></div></div>` : ""}`;
   const body = `${note}${tools}<div class="chat">${list.map(m => {
     const a = P(m.sender_id), mine = m.sender_id === me.id;
-    return `<div class="msg ${mine && !m.is_announcement ? "me" : ""} ${m.is_announcement ? "annonce" : ""}"><span class="meta">${m.is_announcement ? "📣 Annonce du bureau · " + esc(a.full_name) : mine ? "Moi" : esc(a.full_name) + " · " + esc(roleLabel(a))} · ${fmtTs(m.created_at)}</span><div class="bubble">${m.file_path ? fileHtml(m) : ""}${m.body ? esc(m.body) : ""}</div>${mine ? seenTag(key, m) : ""}${mine && S.readersOpen === m.id ? `<div class="readers">${readersOf(key, m).map(u => esc(P(u).full_name)).sort().join(", ")}</div>` : ""}</div>`;
+    return `<div class="msg ${mine && !m.is_announcement ? "me" : ""} ${m.is_announcement ? "annonce" : ""}"><span class="meta">${m.is_announcement ? "📣 Annonce du bureau · " + esc(a.full_name) : mine ? "Moi" : esc(a.full_name) + " · " + esc(roleLabel(a))} · ${fmtTs(m.created_at)}</span><div class="bubble" data-msgmenu="${m.id}" style="cursor:pointer">${m.file_path ? fileHtml(m) : ""}${m.body ? esc(m.body) : ""}</div>${S.msgMenu === m.id ? msgMenu(key, m) : ""}${mine ? seenTag(key, m) : ""}${mine && S.readersOpen === m.id ? `<div class="readers">${readersOf(key, m).map(u => esc(P(u).full_name)).sort().join(", ")}</div>` : ""}</div>`;
   }).join("") || `<div class="empty">Aucun message. Écris le premier !</div>`}</div>`;
   const composer = `<div class="composer"><form id="send" class="pad"><label class="btn clip" title="Joindre un document" aria-label="Joindre un document">${I.clip}<input type="file" id="chatfile" hidden accept="image/*,.pdf,.doc,.docx"></label><input id="msg" autocomplete="off" placeholder="Écrire un message…" aria-label="Message"><button class="btn">Envoyer</button></form></div>`;
   return { title, body, composer };
@@ -1455,6 +1465,15 @@ function bind() {
     try { for (const c of chunks(ids)) await q(sb.from("events").delete().in("id", c).select());
       D.events = D.events.filter(x => !ids.includes(x.id)); S.confirm = null; render(0); toast(`${ids.length} entraînements supprimés`); } catch (e) { fail(e); }
   });
+  on("[data-msgmenu]", (b, ev) => { if (ev && ev.target.closest("[data-open], img.thumb, a")) return;
+    const id = b.dataset.msgmenu; S.msgMenu = id && S.msgMenu !== id ? id : null; render(true); });
+  on("[data-delmsg]", async b => { const [id, how] = b.dataset.delmsg.split("|"), m = D.msgs.find(x => x.id === id); if (!m) return; const key = convOf(m); S.msgMenu = null;
+    try {
+      if (how === "me") { await savePref(key, { hidden: [...(prefOf(key).hidden || []), id] }); render(true); toast("Message supprimé pour toi"); return; }
+      if (m.file_path) await sb.storage.from(BUCKET).remove([m.file_path]).catch(() => {});
+      await q(sb.from("messages").delete().eq("id", id).select());
+      D.msgs = D.msgs.filter(x => x.id !== id); render(true); toast("Message supprimé pour tout le monde");
+    } catch (e) { fail(e, how === "me" ? "Impossible de supprimer. La base est-elle à jour (mise à jour 16) ?" : undefined); } });
   on("[data-convarch]", async b => { const key = b.dataset.convarch, arch = isArchived(key) || (prefOf(key).archived_at && !msgsOf(key).length);
     try { await savePref(key, { archived_at: arch ? null : new Date().toISOString() });
       if (arch) { render(true); toast("Conversation désarchivée"); } else { go("chats"); toast("Conversation archivée : elle revient dès qu'un nouveau message arrive"); } }
