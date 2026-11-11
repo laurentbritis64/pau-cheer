@@ -76,7 +76,9 @@ let installEvt = null;
 const urlCache = {};
 
 const P = id => (D && D.P[id]) || { id, full_name: "Ancien membre", role: "pending" };
-const T = id => D.teams.find(t => t.id === id) || { id, name: id, color: "#888" };
+const T = id => (D.allTeams || D.teams).find(t => t.id === id) || { id, name: id, color: "#888" };
+// Équipes proposées dans une liste : celles de la saison, plus l'équipe actuelle si elle est en pause
+const teamsFor = cur => (D.allTeams || D.teams).filter(t => t.active !== false || t.id === cur);
 const isBureau = () => me && me.role === "bureau";
 // Peut créer, modifier et supprimer les événements et les déplacements
 const canPlan = () => isBureau() || !!(me && me.can_plan && me.role !== "pending");
@@ -121,7 +123,17 @@ const teamChip = id => { const t = T(id); return `<span class="chip" style="padd
 /* Conversations */
 const dmPair = other => [me.id, other].sort();
 function convOf(m) { return m.team_id ? "team:" + m.team_id : "dm:" + (m.dm_a === me.id ? m.dm_b : m.dm_a); }
-function msgsOf(key) { return D.msgs.filter(m => convOf(m) === key).sort((a, b) => a.created_at.localeCompare(b.created_at)); }
+// Préférences de chacun : conversation archivée, ou vidée « pour moi »
+const prefOf = key => (D.prefs || []).find(p => p.user_id === me.id && p.conv === srvConv(key)) || {};
+const clearedAt = key => prefOf(key).cleared_at ? tms(prefOf(key).cleared_at) : 0;
+function msgsOf(key) { const c = clearedAt(key); return D.msgs.filter(m => convOf(m) === key && (!c || tms(m.created_at) > c)).sort((a, b) => a.created_at.localeCompare(b.created_at)); }
+function isArchived(key) { const a = prefOf(key).archived_at; if (!a) return false; const l = lastOf(key); return !l || tms(l.created_at) <= tms(a); }
+const canWipe = key => key.startsWith("dm:") || isBureau() || (me.role === "coach" && coachTeamsOf(me.id).includes(key.slice(5)));
+async function savePref(key, patch) {
+  const cur = prefOf(key), row = { user_id: me.id, conv: srvConv(key), archived_at: cur.archived_at || null, cleared_at: cur.cleared_at || null, ...patch };
+  const [res] = await q(sb.from("chat_prefs").upsert(row).select());
+  D.prefs = (D.prefs || []).filter(p => !(p.user_id === me.id && p.conv === row.conv)).concat([res || row]);
+}
 function readMap() { return store.get("pau-read-" + me.id, {}); }
 // Lectures enregistrées sur le serveur (pour « Vu » et « Lu par… »)
 const srvConv = key => key.startsWith("dm:") ? "dm:" + dmPair(key.slice(3)).join("_") : key;
@@ -142,8 +154,9 @@ function markRead(key) {
   }
 }
 function unreadIn(key) {
+  if (isArchived(key)) return 0;
   const loc = tms(readMap()[key] || 0), srv = readRow(me.id, key), r = Math.max(loc, srv ? tms(srv.read_at) : 0);
-  return D.msgs.filter(m => convOf(m) === key && m.sender_id !== me.id && tms(m.created_at) > r).length;
+  return msgsOf(key).filter(m => m.sender_id !== me.id && tms(m.created_at) > r).length;
 }
 // Qui a lu ce message (hors l'auteur)
 function readersOf(key, m) {
@@ -224,7 +237,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs, prefs] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
@@ -245,11 +258,12 @@ async function loadAll() {
     q(sb.from("team_requests").select("*").order("created_at", { ascending: false }).limit(300)).catch(() => []),
     q(sb.from("chat_reads").select("*")).catch(() => []),
     q(sb.from("link_requests").select("*").eq("status", "pending")).catch(() => []),
+    q(sb.from("chat_prefs").select("*")).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs };
+  D = { teams: teams.filter(t => t.active !== false), allTeams: teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs, prefs };
   await loadSummary();
 }
 // Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
@@ -272,6 +286,10 @@ function subscribe() {
       if (open) markRead(convOf(m));
       else if (m.sender_id !== me.id) toast((m.is_announcement ? "Annonce de " : "Message de ") + first(P(m.sender_id).full_name));
       render(open);
+    })
+    .on("postgres_changes", { event: "DELETE", schema: "public", table: "messages" }, ({ old: o }) => {
+      if (!D || !o || !o.id || !D.msgs.some(x => x.id === o.id)) return;
+      D.msgs = D.msgs.filter(x => x.id !== o.id); render(S.tab === "chats" && S.view && S.view.kind === "conv");
     })
     .on("postgres_changes", { event: "*", schema: "public", table: "chat_reads" }, ({ new: r }) => {
       if (!D || !r || !r.conv) return;
@@ -437,7 +455,7 @@ function bindAuth() {
     const { error } = await sb.auth.signInWithPassword({ email: val("liEmail"), password: document.getElementById("liPass").value });
     busy(li, false); if (error) authErr(frError(error)); };
   const su = document.getElementById("signup");
-  if (su && !S.signupTeams) sb.from("teams").select("id,name").order("position").then(({ data }) => { if (data && data.length) { S.signupTeams = data.map(t => [t.id, t.name]); } });
+  if (su && !S.signupTeams) sb.from("teams").select("*").order("position").then(({ data }) => { if (data && data.length) { S.signupTeams = data.filter(t => t.active !== false).map(t => [t.id, t.name]); } });
   $app.querySelectorAll("[name=suKind]").forEach(r => r.onchange = () => { keepSignup(); S.suKind = r.value; render(); });
   const keepSignup = () => { const k = readKids(); S.suKids = k.length ? k : (S.suKids || [{}]); const gg = $app.querySelector("[name=suGender]:checked"); if (gg) S.suGender = gg.value; const cc = consentVal($app, "suConsent"); if (cc !== null) S.suConsent = cc; const lg = document.getElementById("suLegal"); if (lg) S.suLegal = lg.checked;
     S.suVals = Object.fromEntries(["suFirst", "suLast", "suEmail", "suBirth", "suTeam", "suPhone", "suEmName", "suEmPhone"].map(id => [id, (document.getElementById(id) || {}).value || ""])); };
@@ -523,7 +541,7 @@ function teamsManageView() {
     ${reqsCard()}
     <input class="search" id="tq" placeholder="Rechercher un athlète…" aria-label="Rechercher">
     ${mine.map(t => { const l = list.filter(a => a.team_id === t); return l.length ? `<div class="daylabel">Équipe ${esc(T(t).name)} · ${l.length}</div><div class="list">${l.map(a => `<div class="item">${avatar(a, 36)}<span class="txt"><span class="t1">${esc(a.full_name)}</span>${a.birth_date ? `<span class="t2">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""}</span>
-      <select class="search" data-move="${a.id}" style="max-width:150px;padding:7px 10px">${D.teams.map(x => `<option value="${x.id}" ${x.id === a.team_id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}<option value="">Sans équipe</option></select></div>`).join("")}</div>` : ""; }).join("") || `<div class="empty">Aucun athlète dans tes équipes.</div>`}
+      <select class="search" data-move="${a.id}" style="max-width:150px;padding:7px 10px">${teamsFor(a.team_id).map(x => `<option value="${x.id}" ${x.id === a.team_id ? "selected" : ""}>${esc(x.name)}</option>`).join("")}<option value="">Sans équipe</option></select></div>`).join("")}</div>` : ""; }).join("") || `<div class="empty">Aucun athlète dans tes équipes.</div>`}
     <button class="btn" data-savemoves>Enregistrer les changements</button>`;
 }
 // Retirer un enfant ajouté par erreur
@@ -567,7 +585,7 @@ function accountView() {
       ${nameFields("acc", me.full_name)}
       <div class="field">Sexe${genderPick("accGender", PV(me.id).gender)}</div>
       ${consentPick("accConsent", PV(me.id).image_consent, "de mon image")}
-      ${isBureau() ? `<label class="field">Je pratique aussi comme athlète dans l'équipe<select id="accTeam"><option value="">Non, je ne suis pas athlète</option>${D.teams.map(t => `<option value="${t.id}" ${me.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
+      ${isBureau() ? `<label class="field">Je pratique aussi comme athlète dans l'équipe<select id="accTeam"><option value="">Non, je ne suis pas athlète</option>${teamsFor(me.team_id).map(t => `<option value="${t.id}" ${me.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
       <label class="field">Téléphone<input id="accPhone" type="tel" value="${esc(PV(me.id).phone || "")}" placeholder="06 12 34 56 78"></label>
       ${isAth(me) ? `<div class="eyebrow">Personne à contacter en cas de problème</div>
         <div class="grid2"><label class="field">Nom<input id="accEmName" value="${esc(PV(me.id).emergency_name || "")}"></label><label class="field">Téléphone<input id="accEmPhone" type="tel" value="${esc(PV(me.id).emergency_phone || "")}"></label></div>` : ""}
@@ -769,6 +787,8 @@ const dayDiff = (a, b) => Math.round((new Date(b + "T12:00:00") - new Date(a + "
 /* ============ Présences aux entraînements ============ */
 function attOf(eid, aid) { return (D.attendance || []).find(a => a.event_id === eid && a.athlete_id === aid); }
 const isAbsent = (eid, aid) => (attOf(eid, aid) || {}).status === "absent";
+// Coachs des équipes de l'événement : présents par défaut
+function coachesOf(e) { return Object.values(D.P).filter(p => p.role === "coach" && coachTeamsOf(p.id).some(t => e.teams.includes(t))).sort((a, b) => a.full_name.localeCompare(b.full_name)); }
 function rollAthletes(e) {
   const teams = isBureau() ? e.teams : me.role === "coach" ? e.teams.filter(t => coachTeamsOf(me.id).includes(t)) : [];
   return athletes().filter(a => teams.includes(a.team_id));
@@ -776,10 +796,11 @@ function rollAthletes(e) {
 function attendanceBlock(e) {
   let html = "";
   const mine = myAthletes().filter(a => e.teams.includes(a.team_id));
+  if (me.role === "coach" && !mine.some(a => a.id === me.id) && e.teams.some(t => coachTeamsOf(me.id).includes(t))) mine.unshift(me);
   for (const a of mine) {
     const at = attOf(e.id, a.id), st = at ? at.status : "present", key = e.id + "|" + a.id;
     html += `<div class="stack" style="gap:6px;border-top:1px solid var(--line);padding-top:8px;margin-top:4px">
-      <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${a.id === me.id ? "Ma présence" : esc(first(a.full_name))}</span>
+      <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${a.id === me.id ? (me.role === "coach" && !e.teams.includes(me.team_id) ? "Ma présence (coach)" : "Ma présence") : esc(first(a.full_name))}</span>
         <button class="btn small ${st === "present" ? "" : "ghost"}" data-att="${key}|present">✓ Présent·e</button>
         <button class="btn small ${st === "absent" ? "danger" : "ghost"}" data-att="${key}|absent">✗ Absent·e</button></div>
       ${st === "absent" ? `<div class="row" style="gap:6px;flex-wrap:wrap">
@@ -789,15 +810,16 @@ function attendanceBlock(e) {
           <label class="btn small ghost">📁 Justificatif<input type="file" hidden accept="image/*,.pdf" data-attfile="${key}"></label></div>` : ""}
     </div>`;
   }
-  const roll = rollAthletes(e);
+  const roll = rollAthletes(e), co = coachesOf(e), cab = co.filter(c => isAbsent(e.id, c.id));
   if (roll.length) {
     const ab = roll.filter(a => isAbsent(e.id, a.id)).length, p = roll.length - ab;
     html += `<button class="row" data-roll="${e.id}" style="gap:8px;border:0;background:var(--surface-2);border-radius:10px;padding:8px 10px;font-size:13px;margin-top:4px;text-align:left;width:100%;flex-wrap:wrap">
-      <span class="tag ok">${p} présent${p > 1 ? "s" : ""} sur ${roll.length}</span>${ab ? `<span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span>` : ""}<span style="margin-left:auto;font-weight:700">Voir l'appel ›</span></button>`;
+      <span class="tag ok">${p} présent${p > 1 ? "s" : ""} sur ${roll.length}</span>${ab ? `<span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span>` : ""}${co.length ? `<span class="tag ${cab.length ? "warn" : "ok"}">${co.length - cab.length}/${co.length} coach${co.length > 1 ? "s" : ""}</span>` : ""}<span style="margin-left:auto;font-weight:700">Voir l'appel ›</span></button>`;
   } else {
     const sm = D.sum[e.id];
     if (sm && sm.total) { const p = sm.total - sm.absent;
       html += `<div class="row" style="gap:8px;font-size:13px;margin-top:4px;flex-wrap:wrap"><span class="tag ok">${p} présent${p > 1 ? "s" : ""} sur ${sm.total}</span>${sm.absent ? `<span class="muted">${sm.absent} absent${sm.absent > 1 ? "s" : ""}</span>` : ""}</div>`; }
+    if (cab.length) html += `<div class="row" style="gap:6px;font-size:13px;margin-top:4px;flex-wrap:wrap">${cab.map(c => `<span class="tag warn">Coach ${esc(first(c.full_name))} absent·e</span>`).join("")}</div>`;
   }
   return html;
 }
@@ -806,7 +828,10 @@ function rollView(id) {
   const roll = rollAthletes(e), ab = roll.filter(a => isAbsent(e.id, a.id)).length;
   return `<div class="card"><b>${esc(e.title)}</b><br><span class="muted" style="text-transform:capitalize">${fmtDay(e.date)} · ${hm(e.start_time)}</span>
     <div class="row" style="gap:8px;margin-top:8px;flex-wrap:wrap"><span class="tag ok">${roll.length - ab} présent${roll.length - ab > 1 ? "s" : ""} sur ${roll.length}</span>${ab ? `<span class="tag comp">${ab} absent${ab > 1 ? "s" : ""}</span>` : ""}</div>
-    <p class="muted" style="margin:6px 0 0;font-size:12.5px">Tout le monde est compté présent, sauf si l'athlète ou un parent a déclaré une absence.</p></div>
+    <p class="muted" style="margin:6px 0 0;font-size:12.5px">Tout le monde est compté présent, sauf si l'athlète, un parent ou le coach a déclaré une absence.</p></div>
+    ${coachesOf(e).length ? `<div class="daylabel">Coachs</div><div class="list">${coachesOf(e).map(c => { const at = attOf(e.id, c.id), st = at ? at.status : "present";
+      return `<div class="item" style="align-items:flex-start">${avatar(c, 36)}<span class="txt"><span class="t1">${esc(c.full_name)}</span><span class="t2">${coachTeamsOf(c.id).filter(t => e.teams.includes(t)).map(t => esc(T(t).name)).join(", ")}${st === "absent" ? " · " + esc(at.reason || "Pas de motif") : ""}</span></span>
+        ${st === "absent" ? '<span class="tag comp">Absent·e</span>' : '<span class="tag ok">Présent·e</span>'}</div>`; }).join("")}</div>` : ""}
     ${[...new Set(roll.map(a => a.team_id))].map(t => `<div class="daylabel">Équipe ${esc(T(t).name)}</div><div class="list">${roll.filter(a => a.team_id === t).sort((a, b) => isAbsent(e.id, b.id) - isAbsent(e.id, a.id)).map(a => { const at = attOf(e.id, a.id), st = at ? at.status : "present";
       return `<div class="item" style="align-items:flex-start">${avatar(a, 36)}<span class="txt"><span class="t1">${esc(a.full_name)} ${consentTag(a.id)}</span>
         ${st === "absent" ? `<span class="t2" style="white-space:normal">${esc(at.reason || "Pas de motif")}</span>${at.file_path ? `<button class="link" style="font-size:13px;padding:0;display:block" data-open="${esc(at.file_path)}">📎 Voir le justificatif</button>` : ""}` : ""}
@@ -825,25 +850,28 @@ async function saveAtt(eid, aid, patch) {
 function lastOf(key) { const l = msgsOf(key); return l[l.length - 1]; }
 function preview(m) { return m ? (m.is_announcement ? "📣 " : "") + first(P(m.sender_id).full_name) + " : " + (m.body || (m.file_name ? "📎 " + m.file_name : "")) : ""; }
 function chatsView() {
-  const teams = myTeams();
-  const teamRows = teams.map(t => {
+  const teams = myTeams().filter(t => T(t).active !== false);
+  const teamRow = t => {
     const key = "team:" + t, m = lastOf(key), n = unreadIn(key), tm = T(t);
     const sub = me.role === "parent" ? "Pour " + childrenIn(t).map(c => first(c.full_name)).join(", ") : "Athlètes, parents et bureau";
     return `<button class="item" data-conv="${key}"><span class="gico" style="background:${tm.color}">${esc(tm.name[0])}</span>
       <span class="txt"><span class="t1">Équipe ${esc(tm.name)}${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? preview(m) : sub)}</span></span>
       <span class="when">${m ? fmtTs(m.created_at) : ""}</span></button>`;
-  }).join("") || `<div class="item muted">Aucune équipe pour l'instant.</div>`;
+  };
+  const teamRows = teams.filter(t => !isArchived("team:" + t)).map(teamRow).join("") || `<div class="item muted">Aucune équipe pour l'instant.</div>`;
   // Conversations déjà commencées, plus le bureau et les coachs (pour les athlètes et parents)
-  const withMsgs = new Set(D.msgs.filter(m => !m.team_id).map(convOf).map(k => k.slice(3)));
+  const withMsgs = new Set(D.msgs.filter(m => !m.team_id).map(convOf).filter(k => msgsOf(k).length).map(k => k.slice(3)));
   const always = isBureau() || me.role === "coach" ? [] : dmPartners().map(p => p.id);
   let partners = Object.values(D.P).filter(p => p.id !== me.id && (withMsgs.has(p.id) || always.includes(p.id)));
   partners.sort((a, b) => ((lastOf("dm:" + b.id) || {}).created_at || "").localeCompare((lastOf("dm:" + a.id) || {}).created_at || ""));
-  const dmRows = partners.map(dmRow).join("") || `<div class="item muted">Aucune conversation privée pour l'instant.</div>`;
+  const dmRows = partners.filter(p => !isArchived("dm:" + p.id)).map(dmRow).join("") || `<div class="item muted">Aucune conversation privée pour l'instant.</div>`;
+  const arch = [...teams.filter(t => isArchived("team:" + t)).map(teamRow), ...partners.filter(p => isArchived("dm:" + p.id)).map(dmRow)];
   return `
     <div class="eyebrow">${me.role === "athlete" ? "Mon équipe" : me.role === "parent" ? "Équipes de mes enfants" : "Toutes les équipes"}</div>
     <div class="list">${teamRows}</div>
     <div class="row" style="justify-content:space-between"><div class="eyebrow">Messages privés</div><button class="btn small" data-contacts>💬 Écrire à quelqu'un</button></div>
     <div class="list">${dmRows}</div>
+    ${arch.length ? `<details class="stack" ${S.showArch ? "open" : ""} data-archbox><summary class="eyebrow" style="cursor:pointer">🗄️ Conversations archivées (${arch.length})</summary><div class="list" style="margin-top:8px">${arch.join("")}</div></details>` : ""}
     <div class="notice">${I.lock}<span>${isBureau() ? "Les messages privés ne sont visibles que par toi et la personne concernée." : "Les messages privés ne sont visibles que par toi et la personne à qui tu écris."}</span></div>`;
 }
 function contactsView() {
@@ -871,7 +899,16 @@ function convView(key) {
   markRead(key);
   if (!S.loadedConv || S.loadedConv !== key) { S.loadedConv = key; loadConv(key); }
   const list = msgsOf(key);
-  const body = `${note}<div class="chat">${list.map(m => {
+  const ask = S.convAsk && S.convAsk.key === key ? S.convAsk.what : null;
+  const tools = `<div class="row" style="gap:6px;flex-wrap:wrap">
+      <button type="button" class="btn small ghost" data-convarch="${key}">${isArchived(key) || prefOf(key).archived_at && !list.length ? "📤 Désarchiver" : "🗄️ Archiver"}</button>
+      <button type="button" class="btn small ghost" data-convask="${key}|clear">🧹 Supprimer pour moi</button>
+      ${canWipe(key) ? `<button type="button" class="btn small ghost" data-convask="${key}|wipe">🗑️ Supprimer pour tout le monde</button>` : ""}</div>
+    ${ask ? `<div class="stack" style="gap:8px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface-2)">
+      <span style="font-size:13.5px">${ask === "clear" ? "<b>Vider cette conversation pour toi ?</b> Les messages actuels disparaissent seulement de ton téléphone et de ton compte. Les autres les voient toujours."
+        : `<b>Supprimer tous les messages pour tout le monde ?</b> ${key.startsWith("team:") ? "Toute l'équipe" : "L'autre personne"} ne les verra plus non plus, et les fichiers joints sont effacés. C'est définitif.`}</span>
+      <div class="row" style="gap:8px"><button type="button" class="btn small" data-convdo="${key}|${ask}" style="${ask === "wipe" ? "background:#c43c3c;color:#fff" : ""}">${ask === "clear" ? "Vider pour moi" : "Supprimer pour tout le monde"}</button><button type="button" class="btn small ghost" data-convask="">Annuler</button></div></div>` : ""}`;
+  const body = `${note}${tools}<div class="chat">${list.map(m => {
     const a = P(m.sender_id), mine = m.sender_id === me.id;
     return `<div class="msg ${mine && !m.is_announcement ? "me" : ""} ${m.is_announcement ? "annonce" : ""}"><span class="meta">${m.is_announcement ? "📣 Annonce du bureau · " + esc(a.full_name) : mine ? "Moi" : esc(a.full_name) + " · " + esc(roleLabel(a))} · ${fmtTs(m.created_at)}</span><div class="bubble">${m.file_path ? fileHtml(m) : ""}${m.body ? esc(m.body) : ""}</div>${mine ? seenTag(key, m) : ""}${mine && S.readersOpen === m.id ? `<div class="readers">${readersOf(key, m).map(u => esc(P(u).full_name)).sort().join(", ")}</div>` : ""}</div>`;
   }).join("") || `<div class="empty">Aucun message. Écris le premier !</div>`}</div>`;
@@ -1086,7 +1123,7 @@ function bureauDocs() {
   const missing = a => DOC_TYPES.filter(x => !docsOf(a.id).some(y => y.doc_type === x));
   const complete = ath.filter(a => !missing(a).length).length;
   return `<div class="card"><div class="eyebrow">Dossiers complets</div><div style="font-family:var(--display);font-size:28px;font-weight:800">${complete}/${ath.length}</div></div>
-    ${D.teams.map(t => { const l = ath.filter(a => a.team_id === t.id); if (!l.length) return "";
+    ${D.allTeams.map(t => { const l = ath.filter(a => a.team_id === t.id); if (!l.length) return "";
       return `<div class="daylabel">Équipe ${esc(t.name)}</div><div class="list">${l.map(a => { const m = missing(a), n = DOC_TYPES.length - m.length;
         return `<button class="item" data-docfor="${a.id}">${avatar(a, 36)}<span class="txt"><span class="t1">${esc(a.full_name)} ${consentTag(a.id)}</span><span class="t2">${m.length ? "Manque : " + esc(m.join(", ")) : "Dossier complet"}</span></span><span class="tag ${m.length ? "warn" : "ok"}">${n}/${DOC_TYPES.length}</span></button>`; }).join("")}</div>`; }).join("") || `<div class="empty">Aucun athlète pour l'instant.</div>`}`;
 }
@@ -1184,7 +1221,7 @@ function bureauView() {
     : p.wish === "parent" ? "Parent" + (D.links.some(l => l.parent_id === p.id) ? " de " + D.links.filter(l => l.parent_id === p.id).map(l => first(P(l.athlete_id).full_name)).join(", ") : "")
     : p.wish === "athlete" ? "Athlète" + (p.team_id ? " · " + T(p.team_id).name : "") : "Coach, bureau ou autre";
   const groups = [["Bureau", all.filter(p => p.role === "bureau")], ["Coachs", all.filter(p => p.role === "coach")],
-    ...D.teams.map(t => ["Équipe " + t.name, [...all.filter(p => isAth(p) && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
+    ...D.allTeams.map(t => ["Équipe " + t.name + (t.active === false ? " (en pause)" : ""), [...all.filter(p => isAth(p) && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
     ["Sans équipe ni enfant relié", all.filter(p => (p.role === "athlete" && !p.team_id) || (p.role === "parent" && !childrenOf(p.id).length))]];
   return `
     ${pending.length ? `<div class="card stack" style="border-color:var(--gold)"><h2>${pending.length} compte${pending.length > 1 ? "s" : ""} à valider</h2>
@@ -1193,6 +1230,9 @@ function bureauView() {
       <button class="card" data-goview="annonce" style="text-align:left;display:flex;flex-direction:column;gap:6px;border-color:var(--gold)"><span style="color:var(--accent)">${I.mega}</span><b>Annonce à toutes les équipes</b><span class="muted" style="font-size:13px">Publiée dans chaque tchat d'équipe</span></button>
       <button class="card" data-goview="addEvent" style="text-align:left;display:flex;flex-direction:column;gap:6px"><span style="color:var(--accent)">${I.cal}</span><b>Ajouter au planning</b><span class="muted" style="font-size:13px">Entraînement ou compétition</span></button>
     </div>
+    <div class="card stack"><h2>Équipes de la saison</h2>
+      <div class="chips" style="flex-wrap:wrap">${D.allTeams.map(t => `<button type="button" class="chip" data-teamactive="${t.id}" aria-pressed="${t.active !== false}"><span class="dot" style="background:${t.active === false ? "var(--line)" : t.color}"></span>${esc(t.name)}${t.active === false ? " · en pause" : ""}</button>`).join("")}</div>
+      <span class="muted" style="font-size:12.5px">Touche une équipe pour la mettre en pause ou la réactiver. Une équipe en pause disparaît des listes, du planning, de l'inscription et des tchats. Rien n'est effacé.</span></div>
     ${(() => { const n = dupPairs().length; return `<button class="card" data-goview="dups" style="text-align:left;display:flex;gap:10px;align-items:center${n ? ";border-color:var(--gold)" : ""}"><span style="color:var(--accent)">${I.user}</span><span style="flex:1"><b>Enfants en double</b><br><span class="muted" style="font-size:13px">${n ? n + " doublon" + (n > 1 ? "s" : "") + " possible" + (n > 1 ? "s" : "") + " à vérifier" : "Fusionner deux fiches d'un même enfant"}</span></span><span class="muted">›</span></button>`; })()}
     <div class="eyebrow">Membres du club · touche un nom pour lui écrire</div>
     <input class="search" id="q" placeholder="Rechercher un nom…" aria-label="Rechercher">
@@ -1221,7 +1261,7 @@ function memberView(id) {
     <label class="field">Rôle<select id="mRole">
       ${[["pending", "En attente (aucun accès)"], ["athlete", "Athlète"], ["parent", "Parent"], ["coach", "Coach"], ["bureau", "Membre du bureau"]].map(([v, l]) => `<option value="${v}" ${role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     ${["athlete", "bureau", "coach"].includes(role) ? `<label class="field">Date de naissance<input id="mBirth" type="date" value="${esc(p.birth_date || "")}"></label>` : ""}
-    ${["athlete", "bureau", "coach"].includes(role) ? `<label class="field">${role === "athlete" ? "Équipe" : "Pratique aussi comme athlète dans l'équipe (facultatif)"}<select id="mTeam"><option value="">${role === "athlete" ? "Choisir…" : "Non, pas athlète"}</option>${D.teams.map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
+    ${["athlete", "bureau", "coach"].includes(role) ? `<label class="field">${role === "athlete" ? "Équipe" : "Pratique aussi comme athlète dans l'équipe (facultatif)"}<select id="mTeam"><option value="">${role === "athlete" ? "Choisir…" : "Non, pas athlète"}</option>${teamsFor(p.team_id).map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
     ${role === "coach" ? `<div class="field">Équipes entraînées<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="mct" value="${t.id}" ${coachTeamsOf(id).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div><span class="muted" style="font-size:13px;font-weight:400">Le coach voit le planning, le tchat et l'appel de ces équipes.</span></div>` : ""}
     ${role === "bureau" ? `<label class="field">Fonction<input id="mTitle" value="${esc(p.title || "")}" placeholder="Président, trésorière, coach…"></label>` : ""}
     ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${kidList.map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)}${a.birth_date ? ` <span class="muted" style="font-size:12.5px">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""} ${a.team_id ? teamChip(a.team_id) : '<span class="tag warn">Sans équipe</span>'}${a.role === "pending" ? ' <span class="tag warn">nouveau</span>' : ""}${isLegal(id, a.id) ? ' <span class="tag ok">responsable légal</span>' : ""}${parentsOf(a.id).filter(x => x.id !== id).length ? ` <span class="muted" style="font-size:12.5px">· autre parent : ${parentsOf(a.id).filter(x => x.id !== id).map(x => esc(first(x.full_name))).join(", ")}</span>` : ""}</span></label>`).join("") || '<span class="muted">Aucun enfant pour l\'instant : ajoute-le ci-dessous.</span>'}</div>
@@ -1415,6 +1455,24 @@ function bind() {
     try { for (const c of chunks(ids)) await q(sb.from("events").delete().in("id", c).select());
       D.events = D.events.filter(x => !ids.includes(x.id)); S.confirm = null; render(0); toast(`${ids.length} entraînements supprimés`); } catch (e) { fail(e); }
   });
+  on("[data-convarch]", async b => { const key = b.dataset.convarch, arch = isArchived(key) || (prefOf(key).archived_at && !msgsOf(key).length);
+    try { await savePref(key, { archived_at: arch ? null : new Date().toISOString() });
+      if (arch) { render(true); toast("Conversation désarchivée"); } else { go("chats"); toast("Conversation archivée : elle revient dès qu'un nouveau message arrive"); } }
+    catch (e) { fail(e, "Impossible d'archiver. La base est-elle à jour (mise à jour 15) ?"); } });
+  on("[data-convask]", b => { const [key, what] = b.dataset.convask.split("|"); S.convAsk = key ? { key, what } : null; render(); });
+  on("[data-convdo]", async b => { const [key, what] = b.dataset.convdo.split("|"); S.convAsk = null;
+    try {
+      if (what === "clear") { await savePref(key, { cleared_at: new Date().toISOString() }); go("chats"); toast("Conversation vidée pour toi"); return; }
+      const files = D.msgs.filter(m => convOf(m) === key && m.file_path).map(m => m.file_path);
+      if (files.length) await sb.storage.from(BUCKET).remove(files).catch(() => {});
+      await q(sb.rpc("delete_conv", { c: srvConv(key) }));
+      D.msgs = D.msgs.filter(m => convOf(m) !== key); D.reads = (D.reads || []).filter(r => r.conv !== srvConv(key)); D.prefs = (D.prefs || []).filter(p => p.conv !== srvConv(key));
+      go("chats"); toast("Conversation supprimée pour tout le monde");
+    } catch (e) { fail(e, "La suppression n'a pas marché. La base est-elle à jour (mise à jour 15) ?"); } });
+  const ab = $app.querySelector("[data-archbox]"); if (ab) ab.ontoggle = () => { S.showArch = ab.open; };
+  on("[data-teamactive]", async b => { const id = b.dataset.teamactive, t = T(id), v = t.active === false;
+    try { await q(sb.from("teams").update({ active: v }).eq("id", id).select()); await loadAll(); render(0); toast(v ? "Équipe " + t.name + " active cette saison" : "Équipe " + t.name + " mise en pause"); }
+    catch (e) { fail(e, "Impossible de changer l'équipe. La base est-elle à jour (mise à jour 15) ?"); } });
   on("[data-readers]", b => { S.readersOpen = S.readersOpen === b.dataset.readers ? null : b.dataset.readers; render(true); });
   on("[data-open]", async b => { try { const u = await signedUrl(b.dataset.open); window.open(u, "_blank", "noopener"); } catch (e) { fail(e, "Impossible d'ouvrir ce fichier."); } });
   on("[data-packfor]", b => { S.packFor = b.dataset.packfor; render(0); });
