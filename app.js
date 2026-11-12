@@ -1075,14 +1075,19 @@ function bringBlock(tr) {
   if (isBureau() || (canPlan() && !concerned(tr).length)) {
     const e = eventOf(tr), ath = athletes().filter(a => e.teams.includes(a.team_id));
     const ready = ath.filter(a => t && packedOf(id, a.id).length === t).length;
-    return `<div class="card stack"><h2>À emporter</h2>
-      <p class="muted" style="margin:0;font-size:13px">Chaque athlète ou parent coche cette liste en préparant le sac. Tu peux ajouter ou retirer des affaires.</p>
-      <div>${items.map(i => `<div class="check"><span>${esc(i.label)}</span><button class="x" data-delitem="${i.id}" aria-label="Retirer ${esc(i.label)}">×</button></div>`).join("") || '<div class="muted">Aucune affaire dans la liste.</div>'}</div>
+    // Un membre du bureau qui a un enfant (ou qui est athlète) coche aussi son propre sac
+    return (concerned(tr).length && t ? packBlock(tr) : "") + `<div class="card stack"><h2>${concerned(tr).length ? "Liste du déplacement" : "À emporter"}</h2>
+      <p class="muted" style="margin:0;font-size:13px">Chaque athlète ou parent coche ces cases en préparant le sac. Tu peux ajouter ou retirer des affaires.</p>
+      <div>${items.map(i => `<div class="check"><input type="checkbox" disabled aria-hidden="true" tabindex="-1"><span>${esc(i.label)}</span><button class="x" data-delitem="${i.id}" aria-label="Retirer ${esc(i.label)}">×</button></div>`).join("") || '<div class="muted">Aucune affaire dans la liste.</div>'}</div>
       <form id="addbring" class="row" style="gap:6px"><input id="brTxt" class="search" placeholder="Ex : Crème solaire, coussin…" aria-label="Nouvelle affaire"><button class="btn small">Ajouter</button></form>
       <div class="eyebrow" style="margin-top:6px">Sacs prêts : ${ready}/${ath.length}</div>
       ${ath.map(a => { const n = packedOf(id, a.id).length; return `<div class="row" style="font-size:13.5px"><span style="flex:1;min-width:0">${esc(a.full_name)}</span><span class="bar" style="width:90px"><i style="width:${t ? n / t * 100 : 0}%"></i></span><span style="width:34px;text-align:right;font-variant-numeric:tabular-nums">${n}/${t}</span></div>`; }).join("")}
     </div>`;
   }
+  return packBlock(tr);
+}
+function packBlock(tr) {
+  const id = tr.id, items = itemsOf(id), t = items.length;
   const c = concerned(tr); if (!c.length || !t) return "";
   const sel = c.find(a => a.id === S.packFor) || c[0];
   const done = new Set(packedOf(id, sel.id)), n = done.size;
@@ -1091,7 +1096,7 @@ function bringBlock(tr) {
     <div class="row" style="gap:10px"><span class="bar" style="flex:1"><i style="width:${n / t * 100}%"></i></span><span style="font-weight:700;font-variant-numeric:tabular-nums">${n}/${t}</span></div>
     <div>${items.map(i => `<label class="check ${done.has(i.id) ? "done" : ""}"><input type="checkbox" data-pack="${sel.id}|${i.id}" ${done.has(i.id) ? "checked" : ""}><span>${esc(i.label)}</span></label>`).join("")}</div>
     <p class="muted" style="margin:0;font-size:12.5px">${c.length > 1 ? "Une liste par enfant." : "Coche au fur et à mesure que tu prépares ton sac."} Le bureau voit qui a terminé.</p>
-    ${canPlan() ? `<form id="addbring" class="row" style="gap:6px"><input id="brTxt" class="search" placeholder="Ajouter une affaire pour tous" aria-label="Nouvelle affaire"><button class="btn small">Ajouter</button></form>` : ""}
+    ${canPlan() && !isBureau() ? `<form id="addbring" class="row" style="gap:6px"><input id="brTxt" class="search" placeholder="Ajouter une affaire pour tous" aria-label="Nouvelle affaire"><button class="btn small">Ajouter</button></form>` : ""}
   </div>`;
 }
 
