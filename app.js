@@ -229,9 +229,14 @@ async function enablePush() {
   if (!pushOk()) return toast(isIos() ? "Ajoute d'abord l'appli à l'écran d'accueil (bouton Partager, puis « Sur l'écran d'accueil »), et ouvre-la depuis là." : "Ce navigateur ne gère pas les notifications.");
   const perm = await Notification.requestPermission();
   if (perm !== "granted") return toast("Notifications refusées. Tu peux les autoriser dans les réglages du téléphone.");
-  const res = await fetch(CFG.url + "/functions/v1/notify");
-  const { publicKey } = await res.json().catch(() => ({}));
-  if (!publicKey) throw new Error("Les notifications ne sont pas encore installées côté serveur (fonction « notify »).");
+  let res; try { res = await fetch(CFG.url + "/functions/v1/notify"); } catch (e) { throw new Error("Pas de réponse de la fonction « notify » : vérifie qu'elle existe et que « Verify JWT » est désactivé."); }
+  const r = await res.json().catch(() => ({}));
+  if (!r.publicKey) throw new Error(
+    res.status === 404 ? "La fonction « notify » n'existe pas dans Supabase (vérifie son nom, en minuscules)."
+    : res.status === 401 ? "La fonction « notify » refuse l'accès : désactive « Verify JWT » dans ses réglages."
+    : r.error && /notify_config/.test(r.error) ? "Il manque la mise à jour 18 dans la base (SQL Editor)."
+    : "Réponse inattendue de la fonction « notify » (code " + res.status + (r.error || r.message || r.msg ? " : " + (r.error || r.message || r.msg) : "") + ").");
+  const publicKey = r.publicKey;
   const reg = await navigator.serviceWorker.ready;
   let sub = await reg.pushManager.getSubscription();
   if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(publicKey) });
@@ -1611,7 +1616,7 @@ function bind() {
       await q(sb.from("messages").delete().eq("id", id).select());
       D.msgs = D.msgs.filter(x => x.id !== id); render(true); toast("Message supprimé pour tout le monde");
     } catch (e) { fail(e, how === "me" ? "Impossible de supprimer. La base est-elle à jour (mise à jour 16) ?" : undefined); } });
-  on("[data-pushon]", async b => { b.disabled = true; try { await enablePush(); } catch (e) { fail(e, "Impossible d'activer les notifications. " + (e && e.message ? e.message : "")); } finally { b.disabled = false; } });
+  on("[data-pushon]", async b => { b.disabled = true; try { await enablePush(); } catch (e) { fail(e, "Impossible d'activer les notifications."); } finally { b.disabled = false; } });
   on("[data-pushoff]", async () => { await disablePush(); render(0); toast("Notifications désactivées sur ce téléphone"); });
   on("[data-pushlater]", () => { store.set("pau-push-later", true); render(0); });
   on("[data-boards]", () => go("planning", { kind: "boards" }));
