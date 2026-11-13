@@ -229,7 +229,7 @@ async function enablePush() {
   if (!pushOk()) return toast(isIos() ? "Ajoute d'abord l'appli à l'écran d'accueil (bouton Partager, puis « Sur l'écran d'accueil »), et ouvre-la depuis là." : "Ce navigateur ne gère pas les notifications.");
   const perm = await Notification.requestPermission();
   if (perm !== "granted") return toast("Notifications refusées. Tu peux les autoriser dans les réglages du téléphone.");
-  let res; try { res = await fetch(CFG.url + "/functions/v1/notify"); } catch (e) { throw new Error("Pas de réponse de la fonction « notify » : vérifie qu'elle existe et que « Verify JWT » est désactivé."); }
+  let res; try { res = await fetch(CFG.url + "/functions/v1/notify", { headers: { Authorization: "Bearer " + ((session && session.access_token) || CFG.anonKey), apikey: CFG.anonKey } }); } catch (e) { throw new Error("Pas de réponse de la fonction « notify » : vérifie qu'elle existe et que « Verify JWT » est désactivé."); }
   const r = await res.json().catch(() => ({}));
   if (!r.publicKey) throw new Error(
     res.status === 404 ? "La fonction « notify » n'existe pas dans Supabase (vérifie son nom, en minuscules)."
@@ -288,7 +288,7 @@ async function start() {
       if (error) throw error;
       me = prof || { id: uid, full_name: "", role: "pending" };
       myEmail = session.user.email || "";
-      if (me.role === "pending") { D = null; render(); return; }
+      if (me.role === "pending") { D = null; render(); sb.rpc("announce_signup").then(() => {}, () => {}); return; }
       await loadAll();
       subscribe();
       render();
