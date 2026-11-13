@@ -194,3 +194,9 @@ nav.tabs button[aria-current="page"]{color:#e4b448}
 .gpick .chip{position:relative}
 .gpick .chip{padding:6px 12px}
 .gpick .g-N:has(input:checked){border-color:#8b5cf6;background:#efe9fe;color:#5b3bb5}
+
+/* Petit œil des mots de passe */
+.pw-wrap { position: relative; display: block; }
+.pw-wrap input { width: 100%; padding-right: 44px; box-sizing: border-box; }
+.pw-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; background: none; border: 0; padding: 0; color: var(--muted, #888); cursor: pointer; border-radius: 8px; }
+.pw-eye:hover, .pw-eye:focus-visible { color: var(--accent, #c00); }
