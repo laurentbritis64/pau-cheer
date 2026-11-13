@@ -213,6 +213,64 @@ function boot() {
   window.addEventListener("offline", render);
 }
 
+/* ============ Notifications sur le téléphone ============ */
+const pushOk = () => "serviceWorker" in navigator && "PushManager" in window && "Notification" in window;
+const isIos = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+const standalone = () => (window.matchMedia && matchMedia("(display-mode: standalone)").matches) || navigator.standalone === true;
+const b64u = s => { const p = "=".repeat((4 - s.length % 4) % 4), r = atob((s + p).replace(/-/g, "+").replace(/_/g, "/")); return Uint8Array.from(r, c => c.charCodeAt(0)); };
+async function checkPush() {
+  if (!pushOk()) return;
+  try { const reg = await navigator.serviceWorker.ready, sub = await reg.pushManager.getSubscription(); const was = S.pushSub; S.pushSub = !!sub && Notification.permission === "granted";
+    // Abonnement à jour pour ce compte
+    if (sub && S.pushSub) { const j = sub.toJSON(); sb.from("push_subscriptions").upsert({ endpoint: j.endpoint, user_id: me.id, p256dh: j.keys.p256dh, auth: j.keys.auth }).then(() => {}, () => {}); }
+    if (was !== S.pushSub) render(0); } catch (e) {}
+}
+async function enablePush() {
+  if (!pushOk()) return toast(isIos() ? "Ajoute d'abord l'appli à l'écran d'accueil (bouton Partager, puis « Sur l'écran d'accueil »), et ouvre-la depuis là." : "Ce navigateur ne gère pas les notifications.");
+  const perm = await Notification.requestPermission();
+  if (perm !== "granted") return toast("Notifications refusées. Tu peux les autoriser dans les réglages du téléphone.");
+  const res = await fetch(CFG.url + "/functions/v1/notify");
+  const { publicKey } = await res.json().catch(() => ({}));
+  if (!publicKey) throw new Error("Les notifications ne sont pas encore installées côté serveur (fonction « notify »).");
+  const reg = await navigator.serviceWorker.ready;
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64u(publicKey) });
+  const j = sub.toJSON();
+  await q(sb.from("push_subscriptions").upsert({ endpoint: j.endpoint, user_id: me.id, p256dh: j.keys.p256dh, auth: j.keys.auth }).select());
+  S.pushSub = true; render(0); toast("Notifications activées sur ce téléphone 🔔");
+}
+async function disablePush() {
+  try { const reg = await navigator.serviceWorker.ready, sub = await reg.pushManager.getSubscription();
+    if (sub) { await sb.from("push_subscriptions").delete().eq("endpoint", sub.endpoint); await sub.unsubscribe(); } } catch (e) {}
+  S.pushSub = false;
+}
+function pushCard(home) {
+  if (home && (S.pushSub || store.get("pau-push-later", false) || (pushOk() && Notification.permission === "denied"))) return "";
+  if (home && !pushOk() && !isIos()) return "";
+  const what = isBureau() ? "les nouveaux messages et les comptes à valider" : me.role === "coach" ? "les nouveaux messages et les changements d'équipe à valider" : "les nouveaux messages des tchats";
+  if (S.pushSub) return `<div class="card stack"><h2>🔔 Notifications</h2><span class="muted" style="font-size:13.5px">Activées sur ce téléphone : tu es prévenu·e pour ${what}.</span>
+    <button type="button" class="btn small ghost" data-pushoff style="align-self:flex-start">Désactiver sur ce téléphone</button></div>`;
+  return `<div class="card stack" style="border-color:var(--gold)"><h2>🔔 Recevoir les notifications</h2>
+    <span class="muted" style="font-size:13.5px">Sois prévenu·e sur ce téléphone pour ${what}, même quand l'appli est fermée.</span>
+    ${isIos() && !standalone() ? `<span style="font-size:13.5px">Sur iPhone : touche <b>Partager</b> puis <b>« Sur l'écran d'accueil »</b>, ouvre l'appli depuis l'icône, puis reviens ici.</span>` : ""}
+    ${pushOk() && Notification.permission === "denied" ? `<span style="font-size:13.5px">Les notifications sont bloquées pour ce site : autorise-les dans les réglages du téléphone ou du navigateur.</span>` : ""}
+    <div class="row" style="gap:6px;flex-wrap:wrap"><button type="button" class="btn small" data-pushon>Activer les notifications</button>${home ? `<button type="button" class="btn small ghost" data-pushlater>Plus tard</button>` : ""}</div></div>`;
+}
+// Ouvrir la bonne page depuis une notification (#chat=…, #bureau, #home)
+function openFromHash() {
+  const h = decodeURIComponent((location.hash || "").slice(1)); if (!h || !me || !D) return;
+  if (/^(access_token|error|type)=/.test(h)) return;
+  history.replaceState(null, "", location.pathname + location.search);
+  if (h.startsWith("chat=")) go("chats", { kind: "conv", key: h.slice(5) });
+  else if (h === "bureau" && isBureau()) go("bureau");
+  else if (h === "home") go("home");
+}
+function setBadge() {
+  try { if (!navigator.setAppBadge || !D) return;
+    const n = totalUnread() + (isBureau() ? Object.values(D.P).filter(p => p.id !== me.id && p.role === "pending" && !p.managed).length + (D.linkReqs || []).length : 0) + reqsToDecide().length;
+    n ? navigator.setAppBadge(n) : navigator.clearAppBadge(); } catch (e) {}
+}
+
 let starting = null;
 async function start() {
   if (!session) { me = null; D = null; render(); return; }
@@ -229,6 +287,7 @@ async function start() {
       await loadAll();
       subscribe();
       render();
+      openFromHash(); checkPush();
     } catch (e) { fail(e, "Impossible de charger les données."); $app.innerHTML = `<div class="loading pad">Impossible de charger les données. <button class="btn small" onclick="location.reload()">Réessayer</button></div>`; }
     finally { starting = null; }
   })();
@@ -376,7 +435,7 @@ function render(keepBottom) {
   if (active) { const el = document.getElementById(active); if (el) el.focus({ preventScroll: true }); }
   if (keepBottom === true && atBottom) window.scrollTo(0, document.body.scrollHeight);
   else if (keepBottom !== undefined) window.scrollTo(0, y);
-  bind();
+  bind(); setBadge();
   fillImages();
 }
 
@@ -494,7 +553,7 @@ function bindAuth() {
     const { error } = await sb.auth.updateUser({ password: document.getElementById("npPass").value });
     if (error) return authErr(frError(error)); recovery = false; toast("Mot de passe enregistré"); start(); };
   const rf = document.getElementById("refresh"); if (rf) rf.onclick = () => start();
-  const lo = document.getElementById("logout"); if (lo) lo.onclick = () => sb.auth.signOut();
+  const lo = document.getElementById("logout"); if (lo) lo.onclick = async () => { await disablePush(); sb.auth.signOut(); };
   bindInstall();
 }
 
@@ -609,6 +668,7 @@ function accountView() {
       <div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn small">Enregistrer</button>${removeKidBtn(c)}</div>${removeKidConfirm(c)}</form>`).join("") : ""}
     ${me.role === "athlete" ? `<div class="card stack"><h2>Mon équipe : ${me.team_id ? esc(T(me.team_id).name) : "aucune"}</h2>${teamReqBlock(me)}</div>` : ""}
     ${myKidsCard()}
+    ${pushCard(false)}
     <form id="passForm" class="card stack"><h2>Changer de mot de passe</h2><label class="field">Nouveau mot de passe<input id="accPass" type="password" minlength="8" autocomplete="new-password" required></label><button class="btn small" style="align-self:flex-start">Changer</button></form>
     ${installCard()}
     <button class="btn ghost" id="logout">Se déconnecter</button>`;
@@ -631,6 +691,7 @@ function homeView() {
         : myAthletes().length ? tile('data-tab="docs"', missing, "document" + (missing > 1 ? "s" : "") + " à envoyer", missing > 0) : tile('data-tab="planning"', next.length, "prochains rendez-vous", false)}
     </div>
     ${isBureau() ? (() => { const nd = dupPairs().length; return `<button class="card" data-tab="bureau" style="text-align:left;display:flex;gap:12px;align-items:center;border-color:var(--gold)"><span style="color:var(--accent);width:26px;height:26px;display:flex">${I.user}</span><span style="flex:1"><b style="font-size:16px">Espace bureau</b><br><span class="muted" style="font-size:13px">Membres, comptes à valider, enfants en double${nd ? ` (<b style="color:var(--accent)">${nd}</b>)` : ""}, annonces</span></span><span style="font-size:20px;color:var(--accent)">›</span></button>`; })() : ""}
+    ${pushCard(true)}
     ${reqsCard()}
     ${liveBoards().map(boardCard).join("")}
     ${next.length ? `<div class="card stack"><div class="row" style="justify-content:space-between"><h2>À venir</h2><button class="link" data-tab="planning">Tout le planning</button></div>
@@ -1550,6 +1611,9 @@ function bind() {
       await q(sb.from("messages").delete().eq("id", id).select());
       D.msgs = D.msgs.filter(x => x.id !== id); render(true); toast("Message supprimé pour tout le monde");
     } catch (e) { fail(e, how === "me" ? "Impossible de supprimer. La base est-elle à jour (mise à jour 16) ?" : undefined); } });
+  on("[data-pushon]", async b => { b.disabled = true; try { await enablePush(); } catch (e) { fail(e, "Impossible d'activer les notifications. " + (e && e.message ? e.message : "")); } finally { b.disabled = false; } });
+  on("[data-pushoff]", async () => { await disablePush(); render(0); toast("Notifications désactivées sur ce téléphone"); });
+  on("[data-pushlater]", () => { store.set("pau-push-later", true); render(0); });
   on("[data-boards]", () => go("planning", { kind: "boards" }));
   on("[data-board]", b => { S.bday = null; S.confirmBoard = null; go("planning", { kind: "board", id: b.dataset.board }); });
   on("[data-newboard]", () => go("planning", { kind: "boardForm" }));
@@ -1800,7 +1864,7 @@ function bind() {
     const { error } = await sb.auth.updateUser({ password: document.getElementById("accPass").value });
     if (error) return toast(frError(error)); document.getElementById("accPass").value = ""; toast("Mot de passe changé");
   });
-  const lo = document.getElementById("logout"); if (lo) lo.onclick = () => sb.auth.signOut();
+  const lo = document.getElementById("logout"); if (lo) lo.onclick = async () => { await disablePush(); sb.auth.signOut(); };
   bindInstall();
 }
 
@@ -1808,6 +1872,10 @@ function bind() {
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible" && D && me && me.role !== "pending") reload(); });
 
 /* Service worker : rend l'app installable et utilisable hors ligne */
-if ("serviceWorker" in navigator) window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+if ("serviceWorker" in navigator) {
+  window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));
+  navigator.serviceWorker.addEventListener("message", ev => { if (ev.data && ev.data.open) { location.hash = new URL(ev.data.open).hash; openFromHash(); } });
+}
+window.addEventListener("hashchange", openFromHash);
 
 boot();
