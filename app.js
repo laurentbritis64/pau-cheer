@@ -238,7 +238,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs, prefs] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs, prefs, boards, shifts] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select("*")),
     q(sb.from("parent_links").select("*")),
@@ -260,11 +260,13 @@ async function loadAll() {
     q(sb.from("chat_reads").select("*")).catch(() => []),
     q(sb.from("link_requests").select("*").eq("status", "pending")).catch(() => []),
     q(sb.from("chat_prefs").select("*")).catch(() => []),
+    q(sb.from("shift_boards").select("*").gte("end_date", addDays(todayIso(), -30))).catch(() => []),
+    q(sb.from("shift_signups").select("*").gte("day", addDays(todayIso(), -30))).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams: teams.filter(t => t.active !== false), allTeams: teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs, prefs };
+  D = { teams: teams.filter(t => t.active !== false), allTeams: teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs, prefs, boards, shifts };
   await loadSummary();
 }
 // Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
@@ -328,6 +330,9 @@ function render(keepBottom) {
       if (v && v.kind === "addEvent" && canPlan()) { title = "Ajouter au planning"; body = addEventView(); back = () => go("planning"); }
       else if (v && v.kind === "roll") { title = "Appel"; body = rollView(v.id); back = () => go("planning"); }
       else if (v && v.kind === "teams") { title = "Gérer les équipes"; body = teamsManageView(); back = () => go("planning"); }
+      else if (v && v.kind === "boards") { title = "Permanences"; body = boardsView(); back = () => go("planning"); }
+      else if (v && v.kind === "board") { title = "Permanence"; body = boardView(v.id); back = () => go("planning", { kind: "boards" }); }
+      else if (v && v.kind === "boardForm" && canPlan()) { title = v.id ? "Modifier la permanence" : "Nouvelle permanence"; body = boardFormView(v.id); back = () => v.id ? go("planning", { kind: "board", id: v.id }) : go("planning", { kind: "boards" }); }
       else if (v && v.kind === "editEvent" && canPlan()) { title = "Modifier"; body = editEventView(v.id); back = () => go("planning"); }
       else { title = "Planning"; body = planningView(); }
     }
@@ -627,6 +632,7 @@ function homeView() {
     </div>
     ${isBureau() ? (() => { const nd = dupPairs().length; return `<button class="card" data-tab="bureau" style="text-align:left;display:flex;gap:12px;align-items:center;border-color:var(--gold)"><span style="color:var(--accent);width:26px;height:26px;display:flex">${I.user}</span><span style="flex:1"><b style="font-size:16px">Espace bureau</b><br><span class="muted" style="font-size:13px">Membres, comptes à valider, enfants en double${nd ? ` (<b style="color:var(--accent)">${nd}</b>)` : ""}, annonces</span></span><span style="font-size:20px;color:var(--accent)">›</span></button>`; })() : ""}
     ${reqsCard()}
+    ${liveBoards().map(boardCard).join("")}
     ${next.length ? `<div class="card stack"><div class="row" style="justify-content:space-between"><h2>À venir</h2><button class="link" data-tab="planning">Tout le planning</button></div>
       ${next.map(e => `<div class="row" style="gap:10px;align-items:flex-start"><span style="width:84px;flex:none;font-size:13px;font-weight:700;text-transform:capitalize;white-space:nowrap">${fmtShort(e.date).replace(/\.$/, "")}</span>
         <span style="flex:1;min-width:0"><b>${esc(e.title)}</b> <span class="muted" style="font-size:13px">${hm(e.start_time)}</span><br>${e.teams.filter(t => teams.includes(t)).map(teamChip).join(" ")}</span></div>`).join("")}</div>` : ""}
@@ -661,6 +667,69 @@ function bureauBlock() {
 }
 
 /* ============ Planning ============ */
+/* ============ Permanences (ex. papiers cadeaux) ============ */
+const toMin = t => { const [h, m] = (t || "0:0").split(":").map(Number); return h * 60 + (m || 0); };
+const fromMin = n => String(Math.floor(n / 60)).padStart(2, "0") + ":" + String(n % 60).padStart(2, "0");
+const hhmm = t => hm(t).replace(":", "h");
+function boardSlots(b) { const out = [], a = toMin(b.day_start), z = toMin(b.day_end); for (let t = a; t < z; t += b.slot_minutes) out.push([fromMin(t), fromMin(Math.min(t + b.slot_minutes, z))]); return out; }
+function boardDays(b) { const out = []; for (let d = b.start_date; d <= b.end_date && out.length < 93; d = addDays(d, 1)) out.push(d); return out; }
+const shiftsAt = (bid, day, st) => (D.shifts || []).filter(s => s.board_id === bid && s.day === day && hm(s.start_time) === st);
+const myPeople = () => [me, ...childrenOf(me.id).filter(c => c.id !== me.id)];
+const myShifts = b => (D.shifts || []).filter(s => s.board_id === b.id && myPeople().some(p => p.id === s.person_id)).sort((x, y) => (x.day + x.start_time).localeCompare(y.day + y.start_time));
+const boardFor = b => !b.teams || !b.teams.length || isBureau() || b.teams.some(t => myTeams().includes(t));
+const liveBoards = () => (D.boards || []).filter(b => b.end_date >= todayIso() && boardFor(b)).sort((a, b) => a.start_date.localeCompare(b.start_date));
+function boardFree(b) { const cap = boardDays(b).filter(d => d >= todayIso()).length * boardSlots(b).length * b.capacity; const used = (D.shifts || []).filter(s => s.board_id === b.id && s.day >= todayIso()).length; return Math.max(0, cap - used); }
+const boardDates = b => b.start_date === b.end_date ? fmtShort(b.start_date) : "du " + fmtShort(b.start_date) + " au " + fmtShort(b.end_date);
+function boardCard(b) {
+  const mine = myShifts(b), free = boardFree(b);
+  return `<button class="card" data-board="${b.id}" style="text-align:left;display:flex;flex-direction:column;gap:4px;border-color:var(--gold)">
+    <span class="eyebrow">🙋 Permanence</span><b style="font-size:16px">${esc(b.title)}</b>
+    <span class="muted" style="font-size:13px">${boardDates(b)} · ${hhmm(b.day_start)} – ${hhmm(b.day_end)}${b.place ? " · " + esc(b.place) : ""}</span>
+    <span class="row" style="gap:6px;flex-wrap:wrap">${mine.length ? `<span class="tag ok">${mine.length} créneau${mine.length > 1 ? "x" : ""} réservé${mine.length > 1 ? "s" : ""}</span>` : `<span class="tag warn">Pas encore inscrit·e</span>`}<span class="muted" style="font-size:12.5px">${free} place${free > 1 ? "s" : ""} libre${free > 1 ? "s" : ""}</span></span>
+    <span style="font-weight:700;color:var(--accent)">Choisir un créneau ›</span></button>`;
+}
+function boardsView() {
+  const l = liveBoards();
+  return `${canPlan() ? `<button class="btn" data-newboard>＋ Créer une permanence</button>` : ""}
+    <p class="muted" style="margin:0;font-size:13.5px">Stand de papiers cadeaux, buvette, vente de gâteaux… Choisis un créneau pour donner un coup de main.</p>
+    ${l.map(boardCard).join("") || `<div class="empty">Aucune permanence pour le moment.</div>`}`;
+}
+function boardView(id) {
+  const b = (D.boards || []).find(x => x.id === id); if (!b) return `<div class="empty">Cette permanence n'existe plus.</div>`;
+  const days = boardDays(b), today = todayIso(), day = days.includes(S.bday) ? S.bday : (days.find(d => d >= today) || days[0]);
+  const ppl = canPlan() ? [me, ...Object.values(D.P).filter(p => p.id !== me.id && p.role !== "pending").sort((x, y) => x.full_name.localeCompare(y.full_name))] : myPeople();
+  const who = ppl.find(p => p.id === S.bwho) || me, mine = myShifts(b), past = day < today;
+  return `<div class="card stack"><h2>${esc(b.title)}</h2>
+      <span class="muted" style="font-size:13.5px">${boardDates(b)} · de ${hhmm(b.day_start)} à ${hhmm(b.day_end)} · créneaux de ${b.slot_minutes >= 60 ? (b.slot_minutes / 60).toString().replace(".", ",") + " h" : b.slot_minutes + " min"} · ${b.capacity} personne${b.capacity > 1 ? "s" : ""} par créneau${b.place ? "<br>📍 " + esc(b.place) : ""}</span>
+      ${b.description ? `<span style="font-size:14px;white-space:pre-wrap">${esc(b.description)}</span>` : ""}
+      ${mine.length ? `<div class="eyebrow" style="margin-top:4px">Mes créneaux</div>${mine.map(s => `<div class="row" style="gap:8px;font-size:14px"><span class="tag ok">✓</span><span style="flex:1;text-transform:capitalize">${fmtShort(s.day)} · ${hhmm(s.start_time)}${myPeople().length > 1 ? " · " + esc(first(P(s.person_id).full_name)) : ""}</span></div>`).join("")}` : ""}
+      ${canPlan() ? `<div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn small ghost" data-editboard="${b.id}">Modifier</button>${S.confirmBoard === b.id ? `<button class="btn small" data-delboard="${b.id}" style="background:#c43c3c;color:#fff">Confirmer la suppression</button><button class="btn small ghost" data-askdelboard="">Annuler</button>` : `<button class="btn small ghost" data-askdelboard="${b.id}">Supprimer</button>`}</div>` : ""}</div>
+    ${ppl.length > 1 ? `<label class="field">Inscrire<select id="bWho">${ppl.map(p => `<option value="${p.id}" ${p.id === who.id ? "selected" : ""}>${p.id === me.id ? "Moi (" + esc(first(me.full_name)) + ")" : esc(p.full_name)}</option>`).join("")}</select></label>` : ""}
+    <div class="chips" style="flex-wrap:${days.length > 10 ? "nowrap" : "wrap"}">${days.map(d => { const n = (D.shifts || []).filter(s => s.board_id === b.id && s.day === d && myPeople().some(p => p.id === s.person_id)).length;
+      return `<button class="chip" data-bday="${d}" aria-pressed="${d === day}" style="text-transform:capitalize${d < today ? ";opacity:.5" : ""}">${fmtShort(d).replace(/\.$/, "")}${n ? " ✓" : ""}</button>`; }).join("")}</div>
+    <div class="daylabel">${fmtDay(day)}</div>
+    <div class="list">${boardSlots(b).map(([a, z]) => { const l = shiftsAt(b.id, day, a), full = l.length >= b.capacity, here = l.find(s => s.person_id === who.id);
+      return `<div class="item" style="align-items:flex-start;flex-wrap:wrap">
+        <span style="width:118px;flex:none;font-weight:700;font-size:14px;white-space:nowrap;font-variant-numeric:tabular-nums">${hhmm(a)} – ${hhmm(z)}</span>
+        <span class="txt" style="min-width:120px"><span class="row" style="gap:4px;flex-wrap:wrap">${l.map(s => `<span class="chip" style="padding:3px 9px;font-size:12.5px">${esc(P(s.person_id).full_name)}${canPlan() || myPeople().some(p => p.id === s.person_id) ? ` <button class="x" data-unshift="${b.id}|${day}|${a}|${s.person_id}" aria-label="Retirer" style="border:0;background:none;padding:0 0 0 4px;color:var(--muted)">×</button>` : ""}</span>`).join("")}</span>
+          <span class="t2">${full ? "Complet" : `${b.capacity - l.length} place${b.capacity - l.length > 1 ? "s" : ""} libre${b.capacity - l.length > 1 ? "s" : ""}`}</span></span>
+        ${past ? "" : here ? `<span class="tag ok">Inscrit·e</span>` : full ? `<span class="tag">Complet</span>` : `<button class="btn small" data-shift="${b.id}|${day}|${a}|${who.id}">${who.id === me.id ? "Je viens" : "Inscrire " + esc(first(who.full_name))}</button>`}</div>`; }).join("")}</div>`;
+}
+function boardFormView(id) {
+  const b = (D.boards || []).find(x => x.id === id) || { title: "Papiers cadeaux", place: "", description: "", start_date: todayIso(), end_date: addDays(todayIso(), 7), day_start: "08:30", day_end: "20:30", slot_minutes: 120, capacity: 3, teams: [] };
+  return `<form id="boardForm" class="stack" data-id="${id || ""}">
+    <label class="field">Titre<input id="bfTitle" value="${esc(b.title)}" required placeholder="Papiers cadeaux, buvette…"></label>
+    <label class="field">Lieu<input id="bfPlace" value="${esc(b.place)}" placeholder="Magasin, adresse…"></label>
+    <div class="grid2"><label class="field">Du<input id="bfFrom" type="date" value="${b.start_date}" required></label><label class="field">Au<input id="bfTo" type="date" value="${b.end_date}" required></label></div>
+    <div class="grid2"><label class="field">Début de journée<input id="bfStart" type="time" value="${hm(b.day_start)}" required></label><label class="field">Fin de journée<input id="bfEnd" type="time" value="${hm(b.day_end)}" required></label></div>
+    <div class="grid2"><label class="field">Durée d'un créneau<select id="bfSlot">${[[30, "30 min"], [60, "1 h"], [90, "1 h 30"], [120, "2 h"], [180, "3 h"], [240, "4 h"], [360, "6 h"]].map(([v, l]) => `<option value="${v}" ${b.slot_minutes === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
+      <label class="field">Personnes par créneau<input id="bfCap" type="number" min="1" max="50" value="${b.capacity}" required></label></div>
+    <div class="field">Pour qui ?<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="bftm" value="${t.id}" ${(b.teams || []).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div>
+      <span class="muted" style="font-size:12.5px;font-weight:400">Ne coche rien pour proposer la permanence à tout le club.</span></div>
+    <label class="field">Infos pour les bénévoles<textarea id="bfDesc" rows="3" placeholder="Apporter des ciseaux, du scotch…">${esc(b.description)}</textarea></label>
+    ${id ? `<p class="muted" style="margin:0;font-size:12.5px">Si tu changes les horaires ou la durée des créneaux, les inscriptions qui ne tombent plus sur un créneau sont retirées.</p>` : ""}
+    <button class="btn">${id ? "Enregistrer" : "Créer la permanence"}</button></form>`;
+}
 function planningView() {
   const teams = planTeams(), own = ownTeams().filter(t => teams.includes(t)), hasMine = own.length > 0 && own.length < teams.length;
   const f = S.filter === "mine" ? (hasMine ? "mine" : "all") : S.filter !== "all" && teams.includes(S.filter) ? S.filter : "all";
@@ -680,6 +749,8 @@ function planningView() {
     intro = kids.length ? `<div class="notice">${I.user}<span>Tu vois le planning de <b>${kids.map(c => esc(first(c.full_name))).join(", ")}</b>.</span></div>`
       : `<div class="notice">${I.user}<span>Aucun enfant n'est encore relié à ton compte. Demande au bureau de le faire.</span></div>`;
   }
+  const nb = liveBoards().length;
+  intro += nb || canPlan() ? `<button class="btn ghost" data-boards style="align-self:flex-start">🙋 Permanences${nb ? ` <span class="tag warn">${nb}</span>` : ""}</button>` : "";
   return `${intro}
     ${canPlan() || manageTeams().length ? `<div class="row" style="gap:8px;flex-wrap:wrap">${canPlan() ? `<button class="btn" data-addev>＋ Ajouter un événement</button>` : ""}${manageTeams().length ? `<button class="btn ghost" data-manageteams>👥 Gérer les équipes${reqsToDecide().length ? ` (${reqsToDecide().length})` : ""}</button>` : ""}</div>` : ""}
     ${teams.length > 1 ? `<div class="chips">${hasMine ? `<button class="chip" data-filter="mine" aria-pressed="${f === "mine"}">${own.length > 1 ? "Mes équipes" : "Mon équipe"}</button>` : ""}<button class="chip" data-filter="all" aria-pressed="${f === "all"}">Toutes</button>${teams.map(t => `<button class="chip" data-filter="${esc(t)}" aria-pressed="${f === t}"><span class="dot" style="background:${T(t).color}"></span>${esc(T(t).name)}</button>`).join("")}</div>` : ""}
@@ -1479,6 +1550,23 @@ function bind() {
       await q(sb.from("messages").delete().eq("id", id).select());
       D.msgs = D.msgs.filter(x => x.id !== id); render(true); toast("Message supprimé pour tout le monde");
     } catch (e) { fail(e, how === "me" ? "Impossible de supprimer. La base est-elle à jour (mise à jour 16) ?" : undefined); } });
+  on("[data-boards]", () => go("planning", { kind: "boards" }));
+  on("[data-board]", b => { S.bday = null; S.confirmBoard = null; go("planning", { kind: "board", id: b.dataset.board }); });
+  on("[data-newboard]", () => go("planning", { kind: "boardForm" }));
+  on("[data-editboard]", b => go("planning", { kind: "boardForm", id: b.dataset.editboard }));
+  on("[data-bday]", b => { S.bday = b.dataset.bday; render(0); });
+  on("[data-askdelboard]", b => { S.confirmBoard = b.dataset.askdelboard || null; render(0); });
+  const bw = document.getElementById("bWho"); if (bw) bw.onchange = () => { S.bwho = bw.value; render(0); };
+  on("[data-delboard]", async b => { try { await q(sb.from("shift_boards").delete().eq("id", b.dataset.delboard).select());
+      D.boards = D.boards.filter(x => x.id !== b.dataset.delboard); go("planning", { kind: "boards" }); toast("Permanence supprimée"); } catch (e) { fail(e); } });
+  on("[data-shift]", async b => { const [bid, day, st, pid] = b.dataset.shift.split("|");
+    try { const [r] = await q(sb.from("shift_signups").insert({ board_id: bid, day, start_time: st, person_id: pid }).select());
+      D.shifts.push(r || { board_id: bid, day, start_time: st, person_id: pid }); render(0);
+      toast((pid === me.id ? "Merci ! Tu es inscrit·e " : first(P(pid).full_name) + " est inscrit·e ") + fmtShort(day) + " à " + hhmm(st)); }
+    catch (e) { fail(e, e && /complet|existe pas/.test(e.message || "") ? e.message : "L'inscription n'a pas marché. La base est-elle à jour (mise à jour 17) ?"); await loadAll(); render(0); } });
+  on("[data-unshift]", async b => { const [bid, day, st, pid] = b.dataset.unshift.split("|");
+    try { await q(sb.from("shift_signups").delete().eq("board_id", bid).eq("day", day).eq("start_time", st).eq("person_id", pid).select());
+      D.shifts = D.shifts.filter(s => !(s.board_id === bid && s.day === day && hm(s.start_time) === st && s.person_id === pid)); render(0); toast("Inscription retirée"); } catch (e) { fail(e); } });
   on("[data-convarch]", async b => { const key = b.dataset.convarch, arch = isArchived(key) || (prefOf(key).archived_at && !msgsOf(key).length);
     try { await savePref(key, { archived_at: arch ? null : new Date().toISOString() });
       if (arch) { render(true); toast("Conversation désarchivée"); } else { go("chats"); toast("Conversation archivée : elle revient dès qu'un nouveau message arrive"); } }
@@ -1537,6 +1625,19 @@ function bind() {
 
   const form = (id, fn) => { const f = document.getElementById(id); if (f) f.onsubmit = async ev => { ev.preventDefault(); const b = f.querySelector("button:not([type=button])"); if (b) b.disabled = true; try { await fn(f); } catch (e) { fail(e); } finally { if (b && document.body.contains(b)) b.disabled = false; } }; };
   const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+  form("boardForm", async () => { const el = document.getElementById("boardForm"), id = el.dataset.id;
+    const row = { title: val("bfTitle"), place: val("bfPlace"), description: val("bfDesc"), start_date: val("bfFrom"), end_date: val("bfTo"), day_start: val("bfStart"), day_end: val("bfEnd"),
+      slot_minutes: +val("bfSlot"), capacity: Math.max(1, Math.min(50, +val("bfCap") || 1)), teams: [...$app.querySelectorAll("[name=bftm]:checked")].map(x => x.value) };
+    if (row.end_date < row.start_date) return toast("La date de fin est avant la date de début.");
+    if (dayDiff(row.start_date, row.end_date) > 92) return toast("3 mois maximum.");
+    if (row.day_end <= row.day_start) return toast("La fin de journée doit être après le début.");
+    try {
+      if (id) { await q(sb.from("shift_boards").update(row).eq("id", id).select());
+        const nb = { ...row, id }, ok = new Set(boardSlots(nb).map(x => x[0])), bad = D.shifts.filter(s => s.board_id === id && (s.day < row.start_date || s.day > row.end_date || !ok.has(hm(s.start_time))));
+        for (const s of bad) await q(sb.from("shift_signups").delete().eq("board_id", id).eq("day", s.day).eq("start_time", s.start_time).eq("person_id", s.person_id).select()).catch(() => {});
+        await loadAll(); go("planning", { kind: "board", id }); toast("Permanence modifiée"); }
+      else { const [r] = await q(sb.from("shift_boards").insert({ ...row, created_by: me.id }).select()); await loadAll(); S.bday = null; go("planning", { kind: "board", id: r.id }); toast("Permanence créée : chacun peut maintenant réserver un créneau"); }
+    } catch (e) { fail(e, "Ça n'a pas marché. La base est-elle à jour (mise à jour 17) ?"); } });
 
   const cq = document.getElementById("cq");
   if (cq) { cq.value = S.cq || ""; cq.oninput = () => { S.cq = cq.value; render(0); }; }
