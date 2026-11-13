@@ -538,7 +538,9 @@ function frError(e) {
   if (m.includes("invalid login")) return "E-mail ou mot de passe incorrect.";
   if (m.includes("already registered")) return "Un compte existe déjà avec cet e-mail. Utilise « Mot de passe oublié » si besoin.";
   if (m.includes("email not confirmed")) return "Confirme d'abord ton adresse avec le lien reçu par e-mail.";
-  if (m.includes("rate limit")) return "Trop de tentatives. Réessaie dans quelques minutes.";
+  if (m.includes("email rate limit")) return "Trop d'e-mails envoyés par le club en peu de temps. Réessaie dans une heure, ou préviens le bureau.";
+  if (m.includes("security purposes") || m.includes("after") && m.includes("seconds")) return "Patiente une minute avant de réessayer avec cette adresse.";
+  if (m.includes("rate limit") || m.includes("too many")) return "Trop de tentatives depuis ce réseau. Réessaie dans quelques minutes (ou passe en 4G si tu es sur le wifi du club).";
   if (m.includes("password")) return "Le mot de passe doit faire au moins 8 caractères.";
   return "Ça n'a pas marché. Vérifie ta connexion et réessaie.";
 }
