@@ -200,3 +200,7 @@ nav.tabs button[aria-current="page"]{color:#e4b448}
 .pw-wrap input { width: 100%; padding-right: 44px; box-sizing: border-box; }
 .pw-eye { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 36px; height: 36px; display: flex; align-items: center; justify-content: center; background: none; border: 0; padding: 0; color: var(--muted, #888); cursor: pointer; border-radius: 8px; }
 .pw-eye:hover, .pw-eye:focus-visible { color: var(--accent, #c00); }
+
+/* Liens dans les textes */
+a.ln { color: var(--accent); font-weight: 600; text-decoration: underline; overflow-wrap: anywhere; }
+.msg.me .bubble a.ln { color: inherit; }

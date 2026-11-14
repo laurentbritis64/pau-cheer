@@ -44,6 +44,17 @@ const DEFAULT_ITEMS = ["Tenue de compétition complète", "Nœud et chaussures d
 
 /* ============ Outils ============ */
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// Texte avec liens cliquables (https://…, www.…) : ouverts dans un nouvel onglet
+const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<]+/gi;
+const rich = s => esc(s).replace(URL_RE, u => {
+  let tail = "", m;
+  while ((m = u.match(/(?:[.,;:!?)\]]|&quot;|&#39;|&gt;)$/))) { tail = m[0] + tail; u = u.slice(0, -m[0].length); }
+  if (!u) return tail;
+  const href = /^www\./i.test(u) ? "https://" + u : u;
+  let label = u.replace(/^https?:\/\//i, "").replace(/\/$/, "");
+  if (label.length > 40) label = label.slice(0, 37) + "…";
+  return `<a class="ln" href="${href}" target="_blank" rel="noopener noreferrer">🔗 ${label}</a>${tail}`;
+});
 const initials = n => (n || "?").trim().split(/\s+/).map(x => x[0]).join("").slice(0, 2).toUpperCase();
 const first = n => (n || "").trim().split(/\s+/)[0] || "";
 const hm = t => (t || "").slice(0, 5);
@@ -747,7 +758,7 @@ function homeView() {
       ${n.image_path ? `<img data-path="${esc(n.image_path)}" alt="" style="width:100%;border-radius:10px;max-height:320px;object-fit:cover;background:var(--surface-2);min-height:120px">` : ""}
       <div class="row" style="gap:6px;flex-wrap:wrap">${n.pinned ? '<span class="tag comp">Épinglé</span>' : ""}<span class="muted" style="font-size:12.5px">${fmtDate(n.created_at)} · ${esc(P(n.created_by).full_name)}</span></div>
       <h2>${esc(n.title)}</h2>
-      ${n.body ? `<div style="white-space:pre-wrap;overflow-wrap:anywhere">${esc(n.body)}</div>` : ""}
+      ${n.body ? `<div style="white-space:pre-wrap;overflow-wrap:anywhere">${rich(n.body)}</div>` : ""}
       ${isBureau() ? `<div class="row" style="gap:6px"><button class="btn small ghost" data-pinnews="${n.id}">${n.pinned ? "Désépingler" : "Épingler"}</button>${S.confirmNews === n.id ? `<button class="btn small danger" data-delnews="${n.id}">Confirmer la suppression</button>` : `<button class="btn small ghost" data-askdelnews="${n.id}">Supprimer</button>`}</div>` : ""}
     </article>`).join("") || `<div class="empty">Aucune actualité pour le moment.${isBureau() ? "<br>Publie la première avec le bouton ci-dessus." : ""}</div>`}
     ${bureauBlock()}`;
@@ -798,8 +809,8 @@ function boardView(id) {
   const ppl = canPlan() ? [me, ...Object.values(D.P).filter(p => p.id !== me.id && p.role !== "pending").sort((x, y) => x.full_name.localeCompare(y.full_name))] : myPeople();
   const who = ppl.find(p => p.id === S.bwho) || me, mine = myShifts(b), past = day < today;
   return `<div class="card stack"><h2>${esc(b.title)}</h2>
-      <span class="muted" style="font-size:13.5px">${boardDates(b)} · de ${hhmm(b.day_start)} à ${hhmm(b.day_end)} · créneaux de ${b.slot_minutes >= 60 ? (b.slot_minutes / 60).toString().replace(".", ",") + " h" : b.slot_minutes + " min"} · ${b.capacity} personne${b.capacity > 1 ? "s" : ""} par créneau${b.place ? "<br>📍 " + esc(b.place) : ""}</span>
-      ${b.description ? `<span style="font-size:14px;white-space:pre-wrap">${esc(b.description)}</span>` : ""}
+      <span class="muted" style="font-size:13.5px">${boardDates(b)} · de ${hhmm(b.day_start)} à ${hhmm(b.day_end)} · créneaux de ${b.slot_minutes >= 60 ? (b.slot_minutes / 60).toString().replace(".", ",") + " h" : b.slot_minutes + " min"} · ${b.capacity} personne${b.capacity > 1 ? "s" : ""} par créneau${b.place ? "<br>📍 " + rich(b.place) : ""}</span>
+      ${b.description ? `<span style="font-size:14px;white-space:pre-wrap">${rich(b.description)}</span>` : ""}
       ${mine.length ? `<div class="eyebrow" style="margin-top:4px">Mes créneaux</div>${mine.map(s => `<div class="row" style="gap:8px;font-size:14px"><span class="tag ok">✓</span><span style="flex:1;text-transform:capitalize">${fmtShort(s.day)} · ${hhmm(s.start_time)}${myPeople().length > 1 ? " · " + esc(first(P(s.person_id).full_name)) : ""}</span></div>`).join("")}` : ""}
       ${canPlan() ? `<div class="row" style="gap:6px;flex-wrap:wrap"><button class="btn small ghost" data-editboard="${b.id}">Modifier</button>${S.confirmBoard === b.id ? `<button class="btn small" data-delboard="${b.id}" style="background:#c43c3c;color:#fff">Confirmer la suppression</button><button class="btn small ghost" data-askdelboard="">Annuler</button>` : `<button class="btn small ghost" data-askdelboard="${b.id}">Supprimer</button>`}</div>` : ""}</div>
     ${ppl.length > 1 ? `<label class="field">Inscrire<select id="bWho">${ppl.map(p => `<option value="${p.id}" ${p.id === who.id ? "selected" : ""}>${p.id === me.id ? "Moi (" + esc(first(me.full_name)) + ")" : esc(p.full_name)}</option>`).join("")}</select></label>` : ""}
@@ -873,7 +884,7 @@ function eventCard(e) {
   return `<div class="card ev ${e.type}">
     <div class="time">${hm(e.start_time)}<small>${hm(e.end_time)}</small>${e.no_time ? `<small style="font-weight:600;color:var(--warn)">à confirmer</small>` : ""}</div>
     <div class="body"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="tag ${dep ? "comp" : e.type}">${dep ? "Départ" : evLabel(e.type)}</span>${e.teams.filter(t => teams.includes(t)).map(teamChip).join("")}</div>
-      <div class="title">${esc(e.title)}</div><div class="muted" style="font-size:13px">${esc(e.place)}</div>
+      <div class="title">${rich(e.title)}</div><div class="muted" style="font-size:13px">${rich(e.place)}</div>
       ${kids.length ? `<div style="font-size:13px">Concerne : ${kids.map(esc).join(", ")}</div>` : ""}
       ${dep ? "" : attendanceBlock(e)}
       <div class="row" style="gap:6px;flex-wrap:wrap;margin-top:2px">
@@ -1089,7 +1100,7 @@ function convView(key) {
       <div class="row" style="gap:8px"><button type="button" class="btn small" data-convdo="${key}|${ask}" style="${ask === "wipe" ? "background:#c43c3c;color:#fff" : ""}">${ask === "clear" ? "Vider pour moi" : "Supprimer pour tout le monde"}</button><button type="button" class="btn small ghost" data-convask="">Annuler</button></div></div>` : ""}`;
   const body = `${note}${tools}<div class="chat">${list.map(m => {
     const a = P(m.sender_id), mine = m.sender_id === me.id;
-    return `<div class="msg ${mine && !m.is_announcement ? "me" : ""} ${m.is_announcement ? "annonce" : ""}"><span class="meta">${m.is_announcement ? "📣 Annonce du bureau · " + esc(a.full_name) : mine ? "Moi" : esc(a.full_name) + " · " + esc(roleLabel(a))} · ${fmtTs(m.created_at)}</span><div class="bubble" data-msgmenu="${m.id}" style="cursor:pointer">${m.file_path ? fileHtml(m) : ""}${m.body ? esc(m.body) : ""}</div>${S.msgMenu === m.id ? msgMenu(key, m) : ""}${mine ? seenTag(key, m) : ""}${mine && S.readersOpen === m.id ? `<div class="readers">${readersOf(key, m).map(u => esc(P(u).full_name)).sort().join(", ")}</div>` : ""}</div>`;
+    return `<div class="msg ${mine && !m.is_announcement ? "me" : ""} ${m.is_announcement ? "annonce" : ""}"><span class="meta">${m.is_announcement ? "📣 Annonce du bureau · " + esc(a.full_name) : mine ? "Moi" : esc(a.full_name) + " · " + esc(roleLabel(a))} · ${fmtTs(m.created_at)}</span><div class="bubble" data-msgmenu="${m.id}" style="cursor:pointer">${m.file_path ? fileHtml(m) : ""}${m.body ? rich(m.body) : ""}</div>${S.msgMenu === m.id ? msgMenu(key, m) : ""}${mine ? seenTag(key, m) : ""}${mine && S.readersOpen === m.id ? `<div class="readers">${readersOf(key, m).map(u => esc(P(u).full_name)).sort().join(", ")}</div>` : ""}</div>`;
   }).join("") || `<div class="empty">Aucun message. Écris le premier !</div>`}</div>`;
   const composer = `<div class="composer"><form id="send" class="pad"><label class="btn clip" title="Joindre un document" aria-label="Joindre un document">${I.clip}<input type="file" id="chatfile" hidden accept="image/*,.pdf,.doc,.docx"></label><input id="msg" autocomplete="off" placeholder="Écrire un message…" aria-label="Message"><button class="btn">Envoyer</button></form></div>`;
   return { title, body, composer };
@@ -1194,13 +1205,13 @@ function tripView(id) {
   const dayOpts = sel => days.map(d => `<option value="${d}" ${d === sel ? "selected" : ""}>${fmtShort(d)}</option>`).join("");
   return `
     <div class="hero">
-      <span class="lbl">Compétition le ${fmtDay(e.date)}${multi ? " · déplacement de " + days.length + " jours" : ""}</span><h2>${esc(e.title)}</h2>
+      <span class="lbl">Compétition le ${fmtDay(e.date)}${multi ? " · déplacement de " + days.length + " jours" : ""}</span><h2>${rich(e.title)}</h2>
       <div class="grid"><div><div class="lbl">Départ</div><div style="font-weight:700;text-transform:capitalize">${fmtShort(tr.depart_date || e.date)}</div><div class="big">${tr.depart_time ? hm(tr.depart_time) : "–"}</div></div>
         <div><div class="lbl">Retour</div><div style="font-weight:700;text-transform:capitalize">${fmtShort(tr.return_date || tr.depart_date || e.date)}</div><div style="font-weight:700;font-size:18px;margin-top:6px">${esc(tr.return_time || "–")}</div></div></div>
-      <div><div class="lbl">Rendez-vous</div><div style="font-weight:600">${esc(tr.depart_place || "À préciser")}</div></div>
-      <div><div class="lbl">Transport</div><div style="font-weight:600">${esc(tr.transport || "À préciser")}</div></div>
-      <div><div class="lbl">Lieu de la compétition</div><div style="font-weight:600">${esc(e.place)}</div></div>
-      ${tr.lodging ? `<div><div class="lbl">Hébergement</div><div style="font-weight:600">${esc(tr.lodging)}</div></div>` : ""}
+      <div><div class="lbl">Rendez-vous</div><div style="font-weight:600">${rich(tr.depart_place || "À préciser")}</div></div>
+      <div><div class="lbl">Transport</div><div style="font-weight:600">${rich(tr.transport || "À préciser")}</div></div>
+      <div><div class="lbl">Lieu de la compétition</div><div style="font-weight:600">${rich(e.place)}</div></div>
+      ${tr.lodging ? `<div><div class="lbl">Hébergement</div><div style="font-weight:600">${rich(tr.lodging)}</div></div>` : ""}
     </div>
     ${canPlan() ? (edit ? `<form id="tripForm" class="card stack"><h2>Modifier le déplacement</h2>
         <div class="grid2"><label class="field">Jour de départ<input id="tfDate" type="date" value="${tr.depart_date || e.date}"></label><label class="field">Heure de départ<input id="tfTime" type="time" value="${hm(tr.depart_time)}"></label></div>
@@ -1219,7 +1230,7 @@ function tripView(id) {
         <span class="txt"><b>${KINDS[l.kind] || "Trajet"} · ${esc(l.mode)}</b>
         <span style="display:block;font-size:13.5px"><span class="muted">Départ</span> ${l.day ? fmtShort(l.day) : ""}${l.time ? " à " + hm(l.time) : ""}${l.from_place ? " · " + esc(l.from_place) : ""}</span>
         ${l.arrive_day || l.arrive_time || l.to_place ? `<span style="display:block;font-size:13.5px"><span class="muted">Arrivée</span> ${l.arrive_day ? fmtShort(l.arrive_day) : ""}${l.arrive_time ? " à " + hm(l.arrive_time) : ""}${l.to_place ? " · " + esc(l.to_place) : ""}</span>` : ""}
-        ${l.details ? `<small style="white-space:normal">${esc(l.details)}</small>` : ""}</span>
+        ${l.details ? `<small style="white-space:normal">${rich(l.details)}</small>` : ""}</span>
         ${canPlan() ? `<button class="x" style="border:0;background:none;color:var(--muted);font-size:18px" data-delleg="${l.id}" aria-label="Retirer ce trajet">×</button>` : ""}</div>`).join("") || '<span class="muted">Ajoute l\'aller et le retour (bus, avion…).</span>'}
       ${canPlan() ? `<details><summary style="font-weight:700;cursor:pointer">Ajouter un trajet</summary><form id="addleg" class="stack" style="margin-top:10px">
         <div class="grid2"><label class="field">Type<select id="lgKind"><option value="aller">Aller</option><option value="retour">Retour</option><option value="autre">Autre trajet</option></select></label>
@@ -1232,7 +1243,7 @@ function tripView(id) {
         <label class="field">Détails<input id="lgDetails" placeholder="N° de vol, compagnie, rendez-vous à l'aéroport…"></label>
         <button class="btn small" style="align-self:flex-start">Ajouter le trajet</button></form></details>` : ""}
     </div>` : ""}
-    <div class="card stack"><h2>${multi ? "Programme du déplacement" : "Déroulé de la journée"}</h2><div class="timeline">${steps.map((s, i) => `${multi && (i === 0 || steps[i - 1].day !== s.day) ? `<div class="daylabel" style="padding:4px 0 8px">${s.day ? fmtDay(s.day) : "Jour non précisé"}</div>` : ""}<div class="step"><span class="h">${hm(s.time)}</span><span class="bul"></span><span class="row" style="justify-content:space-between;align-items:flex-start"><span>${esc(s.label)}</span>${canPlan() ? `<button class="x" style="border:0;background:none;color:var(--muted);font-size:18px" data-delstep="${s.id}" aria-label="Retirer">×</button>` : ""}</span></div>`).join("") || '<span class="muted">Le déroulé sera bientôt précisé.</span>'}</div>
+    <div class="card stack"><h2>${multi ? "Programme du déplacement" : "Déroulé de la journée"}</h2><div class="timeline">${steps.map((s, i) => `${multi && (i === 0 || steps[i - 1].day !== s.day) ? `<div class="daylabel" style="padding:4px 0 8px">${s.day ? fmtDay(s.day) : "Jour non précisé"}</div>` : ""}<div class="step"><span class="h">${hm(s.time)}</span><span class="bul"></span><span class="row" style="justify-content:space-between;align-items:flex-start"><span>${rich(s.label)}</span>${canPlan() ? `<button class="x" style="border:0;background:none;color:var(--muted);font-size:18px" data-delstep="${s.id}" aria-label="Retirer">×</button>` : ""}</span></div>`).join("") || '<span class="muted">Le déroulé sera bientôt précisé.</span>'}</div>
       ${canPlan() ? `<form id="addstep" class="row" style="gap:6px;flex-wrap:wrap">${multi ? `<select id="stD" class="search" style="width:auto" aria-label="Jour">${dayOpts(S.lastStepDay || days[0])}</select>` : ""}<input id="stH" type="time" aria-label="Heure" class="search" style="width:110px"><input id="stL" aria-label="Étape" placeholder="Nouvelle étape" class="search"><button class="btn small">Ajouter</button></form>` : ""}
     </div>
     ${bringBlock(tr)}
