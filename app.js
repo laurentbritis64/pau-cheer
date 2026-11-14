@@ -31,6 +31,8 @@ function addEyes(root) {
 }
 new MutationObserver(() => addEyes($app)).observe($app, { childList: true, subtree: true });
 const BUCKET = "club-files";
+// Colonnes des profils lisibles par les membres (la date de naissance passe par visible_birth_dates)
+const PCOLS = "id,full_name,role,team_id,title,created_at,can_plan,managed,wish,photo_path,app_admin";
 // Documents obligatoires pour chaque athlète (comptent pour « dossier complet »)
 const DOC_TYPES = ["Licence FFFA", "Certificat médical", "Autorisation parentale", "Fiche sanitaire", "Droit à l'image"];
 // Toutes les catégories proposées, par rubrique
@@ -330,7 +332,7 @@ async function start() {
   starting = (async () => {
     try {
       const uid = session.user.id;
-      const { data: prof, error } = await sb.from("profiles").select("*").eq("id", uid).maybeSingle();
+      const { data: prof, error } = await sb.from("profiles").select(PCOLS).eq("id", uid).maybeSingle();
       if (error) throw error;
       me = prof || { id: uid, full_name: "", role: "pending" };
       myEmail = session.user.email || "";
@@ -348,9 +350,9 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs, prefs, boards, shifts] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs, prefs, boards, shifts, births] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
-    q(sb.from("profiles").select("*")),
+    q(sb.from("profiles").select(PCOLS)),
     q(sb.from("parent_links").select("*")),
     q(sb.from("events").select("*").gte("date", since).order("date").order("start_time").limit(3000)),
     q(sb.from("event_teams").select("*").limit(10000)),
@@ -372,8 +374,10 @@ async function loadAll() {
     q(sb.from("chat_prefs").select("*")).catch(() => []),
     q(sb.from("shift_boards").select("*").gte("end_date", addDays(todayIso(), -30))).catch(() => []),
     q(sb.from("shift_signups").select("*").gte("day", addDays(todayIso(), -30))).catch(() => []),
+    q(sb.rpc("visible_birth_dates")).catch(() => []),
   ]);
   const Pm = {}; profs.forEach(p => Pm[p.id] = p); Pm[me.id] = Object.assign(Pm[me.id] || {}, me);
+  births.forEach(b => { if (Pm[b.id]) Pm[b.id].birth_date = b.birth_date; if (b.id === me.id) me.birth_date = b.birth_date; });
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
   D = { teams: teams.filter(t => t.active !== false), allTeams: teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs, prefs, boards, shifts };
@@ -702,7 +706,7 @@ function accountView() {
       <span class="muted" style="font-size:13.5px">${esc(myEmail)}</span>
       <div class="row" style="gap:6px">${photoBtn(me.id, me.photo_path ? "📷 Changer ma photo" : "📷 Ajouter ma photo")}</div></div>
     <form id="nameForm" class="card stack"><h2>Mes informations</h2>
-      ${nameFields("acc", me.full_name)}
+      ${nameFields("acc", me.full_name, !isBureau())}
       <div class="field">Sexe${genderPick("accGender", PV(me.id).gender)}</div>
       ${consentPick("accConsent", PV(me.id).image_consent, "de mon image")}
       ${isBureau() ? `<label class="field">Je pratique aussi comme athlète dans l'équipe<select id="accTeam"><option value="">Non, je ne suis pas athlète</option>${teamsFor(me.team_id).map(t => `<option value="${t.id}" ${me.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
@@ -905,7 +909,7 @@ function eventCard(e) {
 /* Photo de profil (ou initiales) */
 function avatar(p, size = 36) {
   const st = `width:${size}px;height:${size}px;font-size:${Math.round(size * .36)}px`;
-  return p && p.photo_path ? `<img class="av" data-path="${esc(p.photo_path)}" data-ini="${initials(p.full_name)}" alt="" style="${st};object-fit:cover">` : `<span class="av" style="${st}">${initials(p && p.full_name)}</span>`;
+  return p && p.photo_path ? `<img class="av" data-path="${esc(p.photo_path)}" data-ini="${esc(initials(p.full_name))}" alt="" style="${st};object-fit:cover">` : `<span class="av" style="${st}">${esc(initials(p && p.full_name))}</span>`;
 }
 const photoBtn = (id, label = "📷 Photo") => `<label class="btn small ghost">${label}<input type="file" hidden accept="image/*" data-photo="${id}"></label>`;
 // Carré 480 px, pour une photo de profil légère
@@ -931,7 +935,7 @@ const genderLabel = (g, kid) => g === "F" ? (kid ? "Fille" : "Femme") : g === "H
 const genderSign = g => g === "F" ? "♀" : g === "H" ? "♂" : "";
 // Deux cases Prénom / Nom (le nom complet reste enregistré en un seul champ)
 const splitName = n => { const w = (n || "").trim().split(/\s+/); return [w[0] || "", w.slice(1).join(" ")]; };
-const nameFields = (pre, full) => { const [f, l] = splitName(full); return `<div class="grid2"><label class="field">Prénom<input id="${pre}First" value="${esc(f)}" required></label><label class="field">Nom<input id="${pre}Last" value="${esc(l)}" required></label></div>`; };
+const nameFields = (pre, full, ro = false) => { const [f, l] = splitName(full), r = ro ? " readonly" : ""; return `<div class="grid2"><label class="field">Prénom<input id="${pre}First" value="${esc(f)}" required${r}></label><label class="field">Nom<input id="${pre}Last" value="${esc(l)}" required${r}></label></div>${ro ? `<span class="muted" style="font-size:12.5px">Pour corriger ton nom, demande au bureau.</span>` : ""}`; };
 const joinName = pre => [document.getElementById(pre + "First").value, document.getElementById(pre + "Last").value].map(x => x.trim()).filter(Boolean).join(" ");
 const tel = p => p ? `<a href="tel:${esc(p.replace(/[^\d+]/g, ""))}">${esc(p)}</a>` : '<span class="muted">non renseigné</span>';
 const isLegal = (pid, aid) => !!(D.links.find(l => l.parent_id === pid && l.athlete_id === aid) || {}).legal;
@@ -1973,8 +1977,8 @@ function bind() {
     const ma = document.getElementById("mAdmin"); if (ma ? ma.checked !== !!P(id).app_admin : P(id).app_admin) upd.app_admin = !!(ma && ma.checked);
     const mp = document.getElementById("mPlan"); if (mp) upd.can_plan = mp.checked; else if (role === "pending") upd.can_plan = false;
     if (role === "athlete" && !upd.team_id) return toast("Choisis l'équipe de l'athlète.");
-    const [row] = await q(sb.from("profiles").update(upd).eq("id", id).select("*"));
-    D.P[id] = row;
+    const [row] = await q(sb.from("profiles").update(upd).eq("id", id).select(PCOLS));
+    D.P[id] = { ...D.P[id], ...row, ...("birth_date" in upd ? { birth_date: upd.birth_date } : {}) };
     const mg = $app.querySelector("[name=mGender]:checked"), pp = { gender: mg ? mg.value : null, image_consent: consentVal($app, "mConsent") };
     if (document.getElementById("mPhone")) pp.phone = val("mPhone");
     if (document.getElementById("mEmName")) { pp.emergency_name = val("mEmName"); pp.emergency_phone = val("mEmPhone"); }
@@ -1987,7 +1991,7 @@ function bind() {
       D.links = D.links.filter(l => l.parent_id !== id).concat(rows);
       // Les enfants déclarés à l'inscription sont validés avec leur parent
       const news = kids.filter(a => P(a).role === "pending");
-      if (news.length) for (const r of await q(sb.from("profiles").update({ role: "athlete" }).in("id", news).select("*"))) D.P[r.id] = r;
+      if (news.length) for (const r of await q(sb.from("profiles").update({ role: "athlete" }).in("id", news).select(PCOLS))) D.P[r.id] = { ...D.P[r.id], ...r };
     }
     if (role === "coach" || role === "bureau" || (D.coachTeams || []).some(c => c.coach_id === id)) {
       const ct = role === "coach" || role === "bureau" ? [...f.querySelectorAll("[name=mct]:checked")].map(x => x.value) : [];
@@ -1999,9 +2003,10 @@ function bind() {
   });
 
   form("nameForm", async () => {
-    const upd = { full_name: joinName("acc") }; if (document.getElementById("accTeam")) upd.team_id = val("accTeam") || null;
-    const [row] = await q(sb.from("profiles").update(upd).eq("id", me.id).select("*"));
-    me = Object.assign(me, row); D.P[me.id] = me;
+    // Seul le bureau peut changer un nom (les autres le demandent au bureau)
+    const upd = isBureau() ? { full_name: joinName("acc") } : {}; if (document.getElementById("accTeam")) upd.team_id = val("accTeam") || null;
+    if (Object.keys(upd).length) { const [row] = await q(sb.from("profiles").update(upd).eq("id", me.id).select(PCOLS));
+      me = Object.assign(me, row); D.P[me.id] = me; }
     const g = $app.querySelector("[name=accGender]:checked"), patch = { gender: g ? g.value : null, phone: val("accPhone"), image_consent: consentVal($app, "accConsent") };
     if (document.getElementById("accEmName")) { patch.emergency_name = val("accEmName"); patch.emergency_phone = val("accEmPhone"); }
     await savePriv(me.id, patch); render(0); toast("Informations enregistrées");
