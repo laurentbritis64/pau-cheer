@@ -88,6 +88,7 @@ function fail(e, msg) {
 }
 
 const I = {
+  stat: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/></svg>',
   check1: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.5l4.5 4.5L19 7.5"/></svg>',
   check2: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M2 12.5L6.5 17 16 7.5M11 15.5l1.5 1.5L22 7.5"/></svg>',
   home: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></svg>',
@@ -430,6 +431,7 @@ function render(keepBottom) {
   if (!me || me.role === "pending" || !D) { $app.innerHTML = pendingView(); bindAuth(); return; }
 
   const tabs = [["home", "Accueil", I.home], ["planning", "Planning", I.cal], ["chats", "Tchats", I.chat], ["trips", "Trajets", I.bus], ["docs", "Documents", I.doc]];
+  if (canStats()) { tabs.splice(4, 0, ["stats", "Stats", I.stat]); tabs[5][1] = "Docs"; }
   let title = "", body = "", back = null, composer = "";
   const v = S.view;
   try {
@@ -455,6 +457,7 @@ function render(keepBottom) {
       else { title = "Déplacements"; body = tripsView(); }
     }
     if (S.tab === "docs") { title = "Documents"; body = docsView(); }
+    if (S.tab === "stats" && canStats()) { title = "Statistiques"; body = statsView(); }
     if (S.tab === "bureau") {
       if (v && v.kind === "annonce") { title = "Annonce"; body = annonceView(); back = () => go("bureau"); }
       else if (v && v.kind === "addEvent") { title = "Ajouter au planning"; body = addEventView(); back = () => go("bureau"); }
@@ -1031,6 +1034,99 @@ async function saveAtt(eid, aid, patch) {
   await loadSummary([eid]);
 }
 
+/* ============ Statistiques de présence (coachs et bureau) ============ */
+const canStats = () => isBureau() || isCoach(me);
+// Saison sportive : du 1er septembre au 5 juillet (comme l'année scolaire)
+const seasonStart = d => { const [y, m] = d.split("-").map(Number); return m >= 8 ? y : y - 1; };
+const seasonRange = y => [`${y}-09-01`, `${y + 1}-07-05`];
+const seasonName = y => `${y}-${y + 1}`;
+const monthName = ym => { const s = new Date(ym + "-15T12:00:00").toLocaleDateString("fr-FR", { month: "long", year: "numeric" }); return s[0].toUpperCase() + s.slice(1); };
+function seasonMonths(y) { const out = []; for (let i = 0; i < 11; i++) { const m = (8 + i) % 12 + 1, yy = m >= 9 ? y : y + 1; out.push(`${yy}-${String(m).padStart(2, "0")}`); } return out; }
+function statsState() {
+  if (!S.st) { const t = todayIso(); S.st = { mode: "month", season: seasonStart(t), month: t.slice(0, 7), team: "all", kind: "train", sort: "low" }; }
+  return S.st;
+}
+function statsRange() {
+  const st = statsState();
+  if (st.mode === "season") return seasonRange(+st.season);
+  const [y, m] = st.month.split("-").map(Number), last = new Date(y, m, 0).getDate();
+  return [`${st.month}-01`, `${st.month}-${String(last).padStart(2, "0")}`];
+}
+async function fetchAll(make) {
+  const out = [];
+  for (let i = 0; ; i += 1000) { const rows = await q(make().range(i, i + 999)); out.push(...rows); if (rows.length < 1000) break; }
+  return out;
+}
+async function loadStats(key, from, to) {
+  try {
+    const [events, evTeams, att] = await Promise.all([
+      fetchAll(() => sb.from("events").select("*").gte("date", from).lte("date", to).order("date")),
+      fetchAll(() => sb.from("event_teams").select("*")),
+      fetchAll(() => sb.from("attendance").select("event_id,athlete_id,status,reason").eq("status", "absent")),
+    ]);
+    const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
+    events.forEach(e => e.teams = evT[e.id] || []);
+    const abs = {}; att.forEach(a => abs[a.event_id + "|" + a.athlete_id] = a);
+    S.stData = { key, events, abs };
+  } catch (e) { S.stData = { key, error: true }; console.error(e); }
+  if (S.tab === "stats") render(0);
+}
+const pct = (n, d) => d ? Math.round(100 * n / d) : 100;
+function rateBar(p) {
+  const c = p >= 85 ? "var(--ok, #2e8b57)" : p >= 65 ? "var(--warn, #c98a00)" : "#c43c3c";
+  return `<span class="stbar" role="img" aria-label="${p} % de présence"><span style="width:${p}%;background:${c}"></span></span>`;
+}
+function statsView() {
+  const st = statsState(), [from, to0] = statsRange(), key = from + "|" + to0;
+  const myT = isBureau() ? D.allTeams.map(t => t.id) : coachTeamsOf(me.id);
+  const sel = st.team === "all" || !myT.includes(st.team) ? myT : [st.team];
+  const curS = seasonStart(todayIso()), seasons = [curS, curS - 1];
+  const controls = `<div class="card stack" style="gap:10px">
+    <div class="chips"><button class="chip" data-st="mode=month" aria-pressed="${st.mode === "month"}">Un mois</button><button class="chip" data-st="mode=season" aria-pressed="${st.mode === "season"}">Une saison</button></div>
+    <div class="row" style="gap:8px;flex-wrap:wrap">
+      <select class="search" style="width:auto" data-stsel="season" aria-label="Saison">${seasons.map(y => `<option value="${y}" ${+st.season === y ? "selected" : ""}>Saison ${seasonName(y)}</option>`).join("")}</select>
+      ${st.mode === "month" ? `<select class="search" style="width:auto" data-stsel="month" aria-label="Mois">${seasonMonths(+st.season).map(m => `<option value="${m}" ${st.month === m ? "selected" : ""}>${monthName(m)}</option>`).join("")}</select>` : ""}
+    </div>
+    <div class="chips" style="flex-wrap:wrap">${myT.length > 1 ? `<button class="chip" data-st="team=all" aria-pressed="${st.team === "all"}">Toutes mes équipes</button>` : ""}${myT.map(t => `<button class="chip" data-st="team=${t}" aria-pressed="${sel.length === 1 && sel[0] === t}"><span class="dot" style="background:${T(t).color}"></span>${esc(T(t).name)}</button>`).join("")}</div>
+    <div class="chips"><button class="chip" data-st="kind=train" aria-pressed="${st.kind === "train"}">Entraînements</button><button class="chip" data-st="kind=all" aria-pressed="${st.kind === "all"}">Tout (compétitions, stages…)</button></div>
+    <span class="muted" style="font-size:12.5px">${st.mode === "season" ? `Saison du 1er septembre ${st.season} au 5 juillet ${+st.season + 1}` : monthName(st.month)}, jusqu'à aujourd'hui. Chacun est compté présent sauf absence signalée, à partir de son inscription dans l'appli.</span>
+  </div>`;
+  if (!S.stData || S.stData.key !== key) { if (!S.stLoading || S.stLoading !== key) { S.stLoading = key; loadStats(key, from, to0); } return controls + `<div class="empty">Calcul des statistiques…</div>`; }
+  if (S.stData.error) return controls + `<div class="empty">Impossible de charger les statistiques. Réessaie plus tard.</div>`;
+  const now = new Date(), today = todayIso(), nowHm = String(now.getHours()).padStart(2, "0") + ":" + String(now.getMinutes()).padStart(2, "0");
+  const done = e => e.date < today || (e.date === today && hm(e.end_time) <= nowHm);
+  const evs = S.stData.events.filter(e => done(e) && (st.kind === "all" ? e.type !== "depart" : e.type === "train") && e.teams.some(t => sel.includes(t)));
+  if (!evs.length) return controls + `<div class="empty">Aucune séance passée sur cette période.</div>`;
+  const abs = S.stData.abs;
+  const since = p => (p.created_at || "").slice(0, 10);
+  const lineOf = p => {
+    const ses = evs.filter(e => e.teams.includes(p.team_id) && e.date >= since(p));
+    const a = ses.filter(e => abs[e.id + "|" + p.id]);
+    return { p, n: ses.length, a, rate: pct(ses.length - a.length, ses.length) };
+  };
+  const lines = athletes().filter(a => sel.includes(a.team_id)).map(lineOf).filter(l => l.n);
+  const coachLine = c => {
+    const ses = evs.filter(e => e.teams.some(t => coachTeamsOf(c.id).includes(t) && sel.includes(t)) && e.date >= since(c));
+    const a = ses.filter(e => abs[e.id + "|" + c.id]);
+    return { p: c, n: ses.length, a, rate: pct(ses.length - a.length, ses.length) };
+  };
+  const coaches = Object.values(D.P).filter(c => isCoach(c) && coachTeamsOf(c.id).some(t => sel.includes(t))).map(coachLine).filter(l => l.n);
+  const totN = lines.reduce((s, l) => s + l.n, 0), totA = lines.reduce((s, l) => s + l.a.length, 0);
+  const sortL = l => st.sort === "name" ? l.sort((x, y) => x.p.full_name.localeCompare(y.p.full_name)) : l.sort((x, y) => x.rate - y.rate || y.a.length - x.a.length || x.p.full_name.localeCompare(y.p.full_name));
+  const row = (l, showTeam) => `<details class="item stline"><summary>${avatar(l.p, 34)}<span class="txt"><span class="t1">${esc(l.p.full_name)}${showTeam && l.p.team_id ? " " + teamChip(l.p.team_id) : ""}</span>
+      <span class="t2">${l.n - l.a.length} présence${l.n - l.a.length > 1 ? "s" : ""} sur ${l.n}${l.a.length ? ` · <b style="color:#c43c3c">${l.a.length} absence${l.a.length > 1 ? "s" : ""}</b>` : ""}</span>${rateBar(l.rate)}</span><b class="strate">${l.rate} %</b></summary>
+      ${l.a.length ? `<ul class="stabs">${l.a.map(e => `<li><span style="text-transform:capitalize">${fmtDay(e.date)}</span>${st.kind === "all" ? ` · ${esc(e.title)}` : ""} · <span class="muted">${esc((abs[e.id + "|" + l.p.id].reason) || "Pas de motif")}</span></li>`).join("")}</ul>` : `<p class="muted" style="margin:6px 0 0 46px;font-size:13px">Aucune absence 👏</p>`}</details>`;
+  const teamCards = sel.length > 1 ? `<div class="stgrid">${sel.map(t => { const tl = lines.filter(l => l.p.team_id === t); if (!tl.length) return ""; const n = tl.reduce((s, l) => s + l.n, 0), a = tl.reduce((s, l) => s + l.a.length, 0), r = pct(n - a, n);
+      return `<button class="card stack" data-st="team=${t}" style="gap:4px;text-align:left"><span class="row" style="gap:6px"><span class="dot" style="background:${T(t).color}"></span><b>${esc(T(t).name)}</b></span><span style="font-size:22px;font-weight:800">${r} %</span>${rateBar(r)}<span class="muted" style="font-size:12px">${evs.filter(e => e.teams.includes(t)).length} séances · ${a} abs.</span></button>`; }).join("")}</div>` : "";
+  return controls + `
+    <div class="card row" style="gap:14px;align-items:center"><span style="font-size:34px;font-weight:800;font-family:var(--display)">${pct(totN - totA, totN)} %</span>
+      <span class="stack" style="gap:2px;flex:1"><b>de présence</b><span class="muted" style="font-size:13px">${evs.length} séance${evs.length > 1 ? "s" : ""} · ${lines.length} athlète${lines.length > 1 ? "s" : ""} · ${totA} absence${totA > 1 ? "s" : ""}</span></span></div>
+    ${teamCards}
+    <div class="row" style="justify-content:space-between;flex-wrap:wrap;gap:6px"><div class="eyebrow">Athlètes</div><div class="chips"><button class="chip" data-st="sort=low" aria-pressed="${st.sort !== "name"}">Moins présents d'abord</button><button class="chip" data-st="sort=name" aria-pressed="${st.sort === "name"}">Par nom</button></div></div>
+    <div class="list">${sortL(lines).map(l => row(l, sel.length > 1)).join("") || `<div class="item muted">Aucun athlète.</div>`}</div>
+    ${coaches.length ? `<div class="eyebrow">Coachs</div><div class="list">${sortL(coaches).map(l => row(l, false)).join("")}</div>` : ""}`;
+}
+
 /* ============ Tchats ============ */
 function lastOf(key) { const l = msgsOf(key); return l[l.length - 1]; }
 function preview(m) { return m ? (m.is_announcement ? "📣 " : "") + first(P(m.sender_id).full_name) + " : " + (m.body || (m.file_name ? "📎 " + m.file_name : "")) : ""; }
@@ -1553,6 +1649,10 @@ function bind() {
     try { const [row] = await q(sb.from("news").update({ pinned: !n.pinned }).eq("id", n.id).select()); Object.assign(n, row); render(0); } catch (e) { fail(e); }
   });
   on("[data-contacts]", () => { S.cq = ""; go("chats", { kind: "contacts" }); });
+  on("[data-st]", b => { const i = b.dataset.st.indexOf("="), k = b.dataset.st.slice(0, i), v = b.dataset.st.slice(i + 1); statsState()[k] = v; render(0); });
+  on("[data-stsel]", el => { const st = statsState(), k = el.dataset.stsel; st[k] = el.value;
+    if (k === "season") { const ms = seasonMonths(+el.value); if (!ms.includes(st.month)) st.month = ms.includes(todayIso().slice(0, 7)) ? todayIso().slice(0, 7) : ms[0]; }
+    render(0); }, "onchange");
   on("[data-roll]", b => go("planning", { kind: "roll", id: b.dataset.roll }));
   on("[data-att]", async b => {
     const [eid, aid, st] = b.dataset.att.split("|");

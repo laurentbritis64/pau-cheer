@@ -204,3 +204,13 @@ nav.tabs button[aria-current="page"]{color:#e4b448}
 /* Liens dans les textes */
 a.ln { color: var(--accent); font-weight: 600; text-decoration: underline; overflow-wrap: anywhere; }
 .msg.me .bubble a.ln { color: inherit; }
+
+/* Statistiques */
+.stbar { display: block; height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; margin-top: 5px; max-width: 220px; }
+.stbar > span { display: block; height: 100%; border-radius: 3px; }
+.stline > summary { display: flex; gap: 12px; align-items: center; cursor: pointer; list-style: none; width: 100%; }
+.stline > summary::-webkit-details-marker { display: none; }
+.stline { display: block; }
+.strate { font-size: 16px; min-width: 52px; text-align: right; }
+.stabs { margin: 8px 0 0 46px; padding: 0; list-style: none; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.stgrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 10px; }
