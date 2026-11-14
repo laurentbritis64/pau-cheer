@@ -117,10 +117,12 @@ function parentsOf(aid) { return D.links.filter(l => l.athlete_id === aid).map(l
 function myTeams() {
   if (isBureau()) return D.teams.map(t => t.id);
   if (me.role === "athlete") return me.team_id ? [me.team_id] : [];
-  if (me.role === "coach") return [...new Set([...coachTeamsOf(me.id), ...(me.team_id ? [me.team_id] : [])])].sort((a, b) => T(a).position - T(b).position);
+  if (me.role === "coach") return [...new Set([...coachTeamsOf(me.id), ...(me.team_id ? [me.team_id] : []), ...childrenOf(me.id).map(c => c.team_id).filter(Boolean)])].sort((a, b) => T(a).position - T(b).position);
   return [...new Set(childrenOf(me.id).map(c => c.team_id).filter(Boolean))].sort((a, b) => T(a).position - T(b).position);
 }
 function coachTeamsOf(id) { return (D.coachTeams || []).filter(c => c.coach_id === id).map(c => c.team_id).sort((a, b) => T(a).position - T(b).position); }
+// Coach : rôle coach, ou membre du bureau qui entraîne aussi une ou plusieurs équipes
+const isCoach = u => !!u && (u.role === "coach" || (u.role === "bureau" && coachTeamsOf(u.id).length > 0));
 // Mes propres équipes (la mienne, celles que j'entraîne, celles de mes enfants), pour le planning par défaut
 function ownTeams() {
   const s = new Set();
@@ -133,13 +135,15 @@ function ownTeams() {
 function defaultTeams() { const all = planTeams(), own = ownTeams().filter(t => all.includes(t)); return own.length ? own : all; }
 const TEAM_LIST = [["lionceaux", "Lionceaux"], ["tigrous", "Tigrous"], ["tigroux", "Tigroux"], ["servals", "Servals"], ["cougars", "Cougars"], ["panthers", "Panthers"], ["pom", "Pom"]];
 function myAthletes() { return [...(isAth(me) ? [me] : []), ...childrenOf(me.id)]; }
-function childrenIn(team) { return me.role === "parent" ? childrenOf(me.id).filter(c => c.team_id === team) : []; }
+function childrenIn(team) { return childrenOf(me.id).filter(c => c.team_id === team); }
 function athletes() { return Object.values(D.P).filter(isAth).sort((a, b) => a.full_name.localeCompare(b.full_name)); }
 function roleLabel(u) {
   const ath = u.role !== "athlete" && isAth(u) ? " · athlète " + T(u.team_id).name : "";
-  if (u.role === "bureau") return (u.title ? u.title + " · " : "") + "Bureau" + ath;
-  if (u.role === "athlete") return "Athlète" + (u.team_id ? " · " + T(u.team_id).name : "");
-  if (u.role === "coach") { const t = coachTeamsOf(u.id); return "Coach" + (t.length ? " · " + t.map(x => T(x).name).join(", ") : "") + ath; }
+  const kids = u.role !== "parent" && u.role !== "pending" && D ? childrenOf(u.id) : [], par = kids.length ? " · parent de " + kids.map(x => first(x.full_name)).join(", ") : "";
+  const ct = u.role === "bureau" ? coachTeamsOf(u.id) : [], co = ct.length ? " · coach " + ct.map(x => T(x).name).join(", ") : "";
+  if (u.role === "bureau") return (u.title ? u.title + " · " : "") + "Bureau" + co + ath + par;
+  if (u.role === "athlete") return "Athlète" + (u.team_id ? " · " + T(u.team_id).name : "") + par;
+  if (u.role === "coach") { const t = coachTeamsOf(u.id); return "Coach" + (t.length ? " · " + t.map(x => T(x).name).join(", ") : "") + ath + par; }
   if (u.role === "parent") { const c = childrenOf(u.id); return c.length ? "Parent de " + c.map(x => first(x.full_name)).join(", ") : "Parent"; }
   return "En attente de validation";
 }
@@ -203,7 +207,7 @@ function dmPartners() {
   const mine = myTeams();
   return all.filter(p => {
     if (p.role === "bureau") return true;
-    if (p.role === "coach") return coachTeamsOf(p.id).some(t => mine.includes(t));
+    if (isCoach(p)) return coachTeamsOf(p.id).some(t => mine.includes(t));
     if (me.role === "coach") {
       if (isAth(p) && mine.includes(p.team_id)) return true;
       if (p.role === "athlete") return false;
@@ -865,7 +869,7 @@ function delChoice(e) {
 }
 function eventCard(e) {
   const teams = planTeams(), tr = e._trip || tripOfEvent(e.id), dep = e.type === "depart";
-  const kids = me.role === "parent" ? e.teams.flatMap(childrenIn).map(c => first(c.full_name)) : [];
+  const kids = e.teams.flatMap(childrenIn).map(c => first(c.full_name));
   return `<div class="card ev ${e.type}">
     <div class="time">${hm(e.start_time)}<small>${hm(e.end_time)}</small>${e.no_time ? `<small style="font-weight:600;color:var(--warn)">à confirmer</small>` : ""}</div>
     <div class="body"><div class="row" style="gap:6px;flex-wrap:wrap"><span class="tag ${dep ? "comp" : e.type}">${dep ? "Départ" : evLabel(e.type)}</span>${e.teams.filter(t => teams.includes(t)).map(teamChip).join("")}</div>
@@ -954,7 +958,7 @@ const dayDiff = (a, b) => Math.round((new Date(b + "T12:00:00") - new Date(a + "
 function attOf(eid, aid) { return (D.attendance || []).find(a => a.event_id === eid && a.athlete_id === aid); }
 const isAbsent = (eid, aid) => (attOf(eid, aid) || {}).status === "absent";
 // Coachs des équipes de l'événement : présents par défaut
-function coachesOf(e) { return Object.values(D.P).filter(p => p.role === "coach" && coachTeamsOf(p.id).some(t => e.teams.includes(t))).sort((a, b) => a.full_name.localeCompare(b.full_name)); }
+function coachesOf(e) { return Object.values(D.P).filter(p => isCoach(p) && coachTeamsOf(p.id).some(t => e.teams.includes(t))).sort((a, b) => a.full_name.localeCompare(b.full_name)); }
 function rollAthletes(e) {
   const teams = isBureau() ? e.teams : me.role === "coach" ? e.teams.filter(t => coachTeamsOf(me.id).includes(t)) : [];
   return athletes().filter(a => teams.includes(a.team_id));
@@ -962,11 +966,11 @@ function rollAthletes(e) {
 function attendanceBlock(e) {
   let html = "";
   const mine = myAthletes().filter(a => e.teams.includes(a.team_id));
-  if (me.role === "coach" && !mine.some(a => a.id === me.id) && e.teams.some(t => coachTeamsOf(me.id).includes(t))) mine.unshift(me);
+  if (isCoach(me) && !mine.some(a => a.id === me.id) && e.teams.some(t => coachTeamsOf(me.id).includes(t))) mine.unshift(me);
   for (const a of mine) {
     const at = attOf(e.id, a.id), st = at ? at.status : "present", key = e.id + "|" + a.id;
     html += `<div class="stack" style="gap:6px;border-top:1px solid var(--line);padding-top:8px;margin-top:4px">
-      <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${a.id === me.id ? (me.role === "coach" && !e.teams.includes(me.team_id) ? "Ma présence (coach)" : "Ma présence") : esc(first(a.full_name))}</span>
+      <div class="row" style="gap:6px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700;flex:1;min-width:0">${a.id === me.id ? (isCoach(me) && !e.teams.includes(me.team_id) ? "Ma présence (coach)" : "Ma présence") : esc(first(a.full_name))}</span>
         <button class="btn small ${st === "present" ? "" : "ghost"}" data-att="${key}|present">✓ Présent·e</button>
         <button class="btn small ${st === "absent" ? "danger" : "ghost"}" data-att="${key}|absent">✗ Absent·e</button></div>
       ${st === "absent" ? `<div class="row" style="gap:6px;flex-wrap:wrap">
@@ -1019,7 +1023,7 @@ function chatsView() {
   const teams = myTeams().filter(t => T(t).active !== false);
   const teamRow = t => {
     const key = "team:" + t, m = lastOf(key), n = unreadIn(key), tm = T(t);
-    const sub = me.role === "parent" ? "Pour " + childrenIn(t).map(c => first(c.full_name)).join(", ") : "Athlètes, parents et bureau";
+    const sub = childrenIn(t).length ? "Pour " + childrenIn(t).map(c => first(c.full_name)).join(", ") : "Athlètes, parents et bureau";
     return `<button class="item" data-conv="${key}"><span class="gico" style="background:${tm.color}">${esc(tm.name[0])}</span>
       <span class="txt"><span class="t1">Équipe ${esc(tm.name)}${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? preview(m) : sub)}</span></span>
       <span class="when">${m ? fmtTs(m.created_at) : ""}</span></button>`;
@@ -1042,8 +1046,8 @@ function chatsView() {
 }
 function contactsView() {
   const qs = (S.cq || "").toLowerCase(), list = dmPartners().filter(p => p.full_name.toLowerCase().includes(qs));
-  const groups = [["Bureau", list.filter(p => p.role === "bureau")], ["Coachs", list.filter(p => p.role === "coach")],
-    ...D.teams.filter(t => isBureau() || myTeams().includes(t.id)).map(t => ["Équipe " + t.name, [...list.filter(p => isAth(p) && p.team_id === t.id), ...list.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]])];
+  const groups = [["Bureau", list.filter(p => p.role === "bureau")], ["Coachs", list.filter(isCoach)],
+    ...D.teams.filter(t => isBureau() || myTeams().includes(t.id)).map(t => ["Équipe " + t.name, [...new Set([...list.filter(p => isAth(p) && p.team_id === t.id), ...list.filter(p => childrenOf(p.id).some(c => c.team_id === t.id))])]])];
   return `<input class="search" id="cq" placeholder="Rechercher un nom…" aria-label="Rechercher">
     ${groups.map(([g, l]) => l.length ? `<div class="daylabel">${esc(g)}</div><div class="list">${l.map(p => `<button class="item" data-conv="dm:${p.id}">${avatar(p, 40)}<span class="txt"><span class="t1">${esc(p.full_name)}</span><span class="t2">${esc(roleLabel(p))}</span></span><span class="btn small">💬</span></button>`).join("")}</div>` : "").join("") || `<div class="empty">Personne à qui écrire pour l'instant.</div>`}`;
 }
@@ -1400,8 +1404,8 @@ function bureauView() {
   const askOf = p => p.managed ? "Enfant ajouté par " + parentsOf(p.id).map(x => x.full_name).join(", ") + (p.team_id ? " · " + T(p.team_id).name : "")
     : p.wish === "parent" ? "Parent" + (D.links.some(l => l.parent_id === p.id) ? " de " + D.links.filter(l => l.parent_id === p.id).map(l => first(P(l.athlete_id).full_name)).join(", ") : "")
     : p.wish === "athlete" ? "Athlète" + (p.team_id ? " · " + T(p.team_id).name : "") : "Coach, bureau ou autre";
-  const groups = [["Bureau", all.filter(p => p.role === "bureau")], ["Coachs", all.filter(p => p.role === "coach")],
-    ...D.allTeams.map(t => ["Équipe " + t.name + (t.active === false ? " (en pause)" : ""), [...all.filter(p => isAth(p) && p.team_id === t.id), ...all.filter(p => p.role === "parent" && childrenOf(p.id).some(c => c.team_id === t.id))]]),
+  const groups = [["Bureau", all.filter(p => p.role === "bureau")], ["Coachs", all.filter(isCoach)],
+    ...D.allTeams.map(t => ["Équipe " + t.name + (t.active === false ? " (en pause)" : ""), [...new Set([...all.filter(p => isAth(p) && p.team_id === t.id), ...all.filter(p => p.role !== "pending" && childrenOf(p.id).some(c => c.team_id === t.id))])]]),
     ["Sans équipe ni enfant relié", all.filter(p => (p.role === "athlete" && !p.team_id) || (p.role === "parent" && !childrenOf(p.id).length))]];
   return `
     ${pending.length ? `<div class="card stack" style="border-color:var(--gold)"><h2>${pending.length} compte${pending.length > 1 ? "s" : ""} à valider</h2>
@@ -1425,7 +1429,7 @@ function memberView(id) {
   const role = S.mRole || (p.role === "pending" && p.wish && !p.managed ? p.wish : p.role);
   const linked = D.links.filter(l => l.parent_id === id).map(l => l.athlete_id);
   const kids = new Set(S.mKids || linked);
-  const kidList = [...new Map([...athletes(), ...linked.map(P)].map(a => [a.id, a])).values()].sort((a, b) => (kids.has(b.id) - kids.has(a.id)) || a.full_name.localeCompare(b.full_name));
+  const kidList = [...new Map([...athletes(), ...linked.map(P)].filter(a => a.id !== id).map(a => [a.id, a])).values()].sort((a, b) => (kids.has(b.id) - kids.has(a.id)) || a.full_name.localeCompare(b.full_name));
   return `<form id="memberForm" class="stack">
     <div class="card stack"><div class="row">${avatar(p, 56)}<span><b>${esc(p.full_name || "Sans nom")}</b><br><span class="muted" id="mEmailTxt" style="font-size:13px">${esc(S.memberEmail.email)}</span></span></div></div>
     ${p.managed ? `<div class="notice">${I.user}<span>Enfant <b>sans compte</b> : ses parents indiquent ses absences et envoient ses documents. Parents : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun"}.</span></div>` : ""}
@@ -1442,15 +1446,15 @@ function memberView(id) {
       ${[["pending", "En attente (aucun accès)"], ["athlete", "Athlète"], ["parent", "Parent"], ["coach", "Coach"], ["bureau", "Membre du bureau"]].map(([v, l]) => `<option value="${v}" ${role === v ? "selected" : ""}>${l}</option>`).join("")}</select></label>
     ${["athlete", "bureau", "coach"].includes(role) ? `<label class="field">Date de naissance<input id="mBirth" type="date" value="${esc(p.birth_date || "")}"></label>` : ""}
     ${["athlete", "bureau", "coach"].includes(role) ? `<label class="field">${role === "athlete" ? "Équipe" : "Pratique aussi comme athlète dans l'équipe (facultatif)"}<select id="mTeam"><option value="">${role === "athlete" ? "Choisir…" : "Non, pas athlète"}</option>${teamsFor(p.team_id).map(t => `<option value="${t.id}" ${p.team_id === t.id ? "selected" : ""}>${esc(t.name)}</option>`).join("")}</select></label>` : ""}
-    ${role === "coach" ? `<div class="field">Équipes entraînées<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="mct" value="${t.id}" ${coachTeamsOf(id).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div><span class="muted" style="font-size:13px;font-weight:400">Le coach voit le planning, le tchat et l'appel de ces équipes.</span></div>` : ""}
+    ${role === "coach" || role === "bureau" ? `<div class="field">${role === "bureau" ? "Entraîne aussi (facultatif)" : "Équipes entraînées"}<div class="chips" style="flex-wrap:wrap">${D.teams.map(t => `<label class="chip"><input type="checkbox" name="mct" value="${t.id}" ${coachTeamsOf(id).includes(t.id) ? "checked" : ""}> ${esc(t.name)}</label>`).join("")}</div><span class="muted" style="font-size:13px;font-weight:400">${role === "bureau" ? "Il ou elle apparaît alors parmi les coachs de ces équipes (présence, contacts)." : "Le coach voit le planning, le tchat et l'appel de ces équipes."}</span></div>` : ""}
     ${role === "bureau" ? `<label class="field">Fonction<input id="mTitle" value="${esc(p.title || "")}" placeholder="Président, trésorière, coach…"></label>` : ""}
-    ${role === "parent" ? `<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${kidList.map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)}${a.birth_date ? ` <span class="muted" style="font-size:12.5px">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""} ${a.team_id ? teamChip(a.team_id) : '<span class="tag warn">Sans équipe</span>'}${a.role === "pending" ? ' <span class="tag warn">nouveau</span>' : ""}${isLegal(id, a.id) ? ' <span class="tag ok">responsable légal</span>' : ""}${parentsOf(a.id).filter(x => x.id !== id).length ? ` <span class="muted" style="font-size:12.5px">· autre parent : ${parentsOf(a.id).filter(x => x.id !== id).map(x => esc(first(x.full_name))).join(", ")}</span>` : ""}</span></label>`).join("") || '<span class="muted">Aucun enfant pour l\'instant : ajoute-le ci-dessous.</span>'}</div>
+    ${["parent", "bureau", "coach", "athlete"].includes(role) ? `${role !== "parent" ? `<details class="card" ${linked.length ? "open" : ""}><summary style="font-weight:700;cursor:pointer">👪 Est aussi parent (facultatif)</summary><div class="stack" style="margin-top:10px">` : ""}<div class="field">Enfants (un ou plusieurs)<div class="card" style="padding:4px 12px">${kidList.map(a => `<label class="check"><input type="checkbox" name="mkid" value="${a.id}" ${kids.has(a.id) ? "checked" : ""}><span>${esc(a.full_name)}${a.birth_date ? ` <span class="muted" style="font-size:12.5px">né·e le ${fmtDate(a.birth_date + "T12:00:00")}</span>` : ""} ${a.team_id ? teamChip(a.team_id) : '<span class="tag warn">Sans équipe</span>'}${a.role === "pending" ? ' <span class="tag warn">nouveau</span>' : ""}${isLegal(id, a.id) ? ' <span class="tag ok">responsable légal</span>' : ""}${parentsOf(a.id).filter(x => x.id !== id).length ? ` <span class="muted" style="font-size:12.5px">· autre parent : ${parentsOf(a.id).filter(x => x.id !== id).map(x => esc(first(x.full_name))).join(", ")}</span>` : ""}</span></label>`).join("") || '<span class="muted">Aucun enfant pour l\'instant : ajoute-le ci-dessous.</span>'}</div>
       <span class="muted" style="font-size:12.5px;font-weight:400">Les enfants cochés et « nouveaux » sont validés en même temps que le parent.</span></div>
       <details class="card"><summary style="font-weight:700;cursor:pointer">＋ Ajouter un enfant</summary><div class="stack" style="margin-top:10px">
         <div class="grid2"><label class="field">Prénom<input id="akFirst"></label><label class="field">Nom<input id="akLast" value="${esc((p.full_name || "").trim().split(/\s+/).slice(1).join(" "))}"></label></div>
         <div class="grid2"><label class="field">Date de naissance<input id="akBirth" type="date"></label><label class="field">Équipe<select id="akTeam"><option value="">Choisir…</option>${D.teams.map(t => `<option value="${t.id}">${esc(t.name)}</option>`).join("")}</select></label></div>
         <p class="muted" style="margin:0;font-size:12.5px">Si l'enfant existe déjà (même prénom, nom et date de naissance), le parent est simplement relié à lui.</p>
-        <button type="button" class="btn small" data-addchild="${id}" style="align-self:flex-start">Ajouter l'enfant</button></div></details>` : ""}
+        <button type="button" class="btn small" data-addchild="${id}" style="align-self:flex-start">Ajouter l'enfant</button></div></details>${role !== "parent" ? "</div></details>" : ""}` : ""}
     ${role !== "pending" ? (role === "bureau" ? `<p class="muted" style="margin:0;font-size:13px">Les membres du bureau peuvent toujours gérer le planning et les déplacements.</p>`
       : `<label class="check card" style="padding:10px 12px"><input type="checkbox" id="mPlan" ${p.can_plan ? "checked" : ""}><span><b>Peut gérer le planning</b><br><span class="muted" style="font-size:13px">Ajouter, modifier et supprimer les événements, compétitions et déplacements.</span></span></label>`) : ""}
     ${role === "athlete" ? `<p class="muted" style="margin:0;font-size:13px">Parents reliés : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun pour l'instant (à faire depuis la fiche du parent)"}.</p>` : ""}
@@ -1858,7 +1862,7 @@ function bind() {
     if (document.getElementById("mPhone")) pp.phone = val("mPhone");
     if (document.getElementById("mEmName")) { pp.emergency_name = val("mEmName"); pp.emergency_phone = val("mEmPhone"); }
     await savePriv(id, pp).catch(e => console.error(e));
-    if (role === "parent") {
+    if (["parent", "bureau", "coach", "athlete"].includes(role)) {
       const kids = [...f.querySelectorAll("[name=mkid]:checked")].map(x => x.value);
       const old = D.links.filter(l => l.parent_id === id), rows = kids.map(a => ({ parent_id: id, athlete_id: a, ...((old.find(l => l.athlete_id === a) || {}).legal ? { legal: true } : {}) }));
       await q(sb.from("parent_links").delete().eq("parent_id", id).select());
@@ -1868,8 +1872,8 @@ function bind() {
       const news = kids.filter(a => P(a).role === "pending");
       if (news.length) for (const r of await q(sb.from("profiles").update({ role: "athlete" }).in("id", news).select("*"))) D.P[r.id] = r;
     }
-    if (role === "coach" || (D.coachTeams || []).some(c => c.coach_id === id)) {
-      const ct = role === "coach" ? [...f.querySelectorAll("[name=mct]:checked")].map(x => x.value) : [];
+    if (role === "coach" || role === "bureau" || (D.coachTeams || []).some(c => c.coach_id === id)) {
+      const ct = role === "coach" || role === "bureau" ? [...f.querySelectorAll("[name=mct]:checked")].map(x => x.value) : [];
       await q(sb.from("coach_teams").delete().eq("coach_id", id).select());
       if (ct.length) await q(sb.from("coach_teams").insert(ct.map(team_id => ({ coach_id: id, team_id }))).select());
       D.coachTeams = (D.coachTeams || []).filter(c => c.coach_id !== id).concat(ct.map(team_id => ({ coach_id: id, team_id })));
