@@ -617,19 +617,36 @@ function bindAuth() {
 }
 
 /* ============ Installation sur l'écran d'accueil ============ */
-const isStandalone = () => window.matchMedia("(display-mode: standalone)").matches || navigator.standalone;
-const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent);
-function installCard() {
+// Tant que l'appli n'est pas installée, on propose de l'ajouter à l'écran d'accueil.
+// Sur iPhone/iPad il n'y a pas d'invite automatique : on explique la marche à suivre.
+const isStandalone = standalone;
+const isIOS = isIos;
+const SHARE_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="vertical-align:-3px"><path d="M12 15V3"/><path d="m7 8 5-5 5 5"/><path d="M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7"/></svg>`;
+const INSTALL_SNOOZE_DAYS = 7;
+const installSnoozed = () => Date.now() < (store.get("installSnooze", 0) || 0);
+function installCard(dismissible) {
   if (isStandalone()) return "";
-  if (installEvt) return `<div class="card install"><img src="icons/icon-192.png" width="44" height="44" alt="" style="border-radius:10px"><span style="flex:1"><b>Installer l'application</b><br><span class="muted" style="font-size:13px">Une icône sur ton écran d'accueil, comme une vraie appli.</span></span><button class="btn small" id="installBtn">Installer</button></div>`;
-  if (isIOS()) return `<div class="card install"><img src="icons/icon-192.png" width="44" height="44" alt="" style="border-radius:10px"><span style="flex:1;font-size:13.5px"><b>Installer sur iPhone</b><br>Dans Safari, touche le bouton <b>Partager</b> puis <b>Sur l'écran d'accueil</b>.</span></div>`;
+  if (dismissible && installSnoozed()) return "";
+  const close = dismissible ? `<button class="install-x" id="installClose" aria-label="Plus tard">×</button>` : "";
+  const icon = `<img src="icons/icon-192.png" width="44" height="44" alt="" style="border-radius:10px;flex:none">`;
+  if (installEvt) return `<div class="card install">${icon}<span style="flex:1"><b>Installer l'application</b><br><span class="muted" style="font-size:13px">Une icône sur ton écran d'accueil, comme une vraie appli.</span></span><button class="btn small" id="installBtn">Installer</button>${close}</div>`;
+  if (isIOS()) {
+    const ua = navigator.userAgent, other = /CriOS|FxiOS|EdgiOS/.test(ua), inApp = /FBAN|FBAV|Instagram|Messenger|WhatsApp|Line\//.test(ua);
+    const where = inApp ? "Ouvre d'abord ce lien dans <b>Safari</b> (menu ⋯ puis « Ouvrir dans Safari »), puis :"
+      : other ? "Touche le bouton <b>Partager</b> " + SHARE_ICON + " (en haut à droite, ou dans le menu ⋯)." : "Touche le bouton <b>Partager</b> " + SHARE_ICON + " en bas de Safari.";
+    return `<div class="card install install-ios">${icon}<span style="flex:1;font-size:13.5px"><b>Installer l'appli sur ton ${/ipad/i.test(ua) || !/iphone|ipod/i.test(ua) ? "iPad" : "iPhone"}</b>
+      <ol class="install-steps"><li>${where}${inApp ? ` Touche <b>Partager</b> ${SHARE_ICON}.` : ""}</li><li>Fais défiler et choisis <b>« Sur l'écran d'accueil »</b>.</li><li>Touche <b>Ajouter</b>, puis ouvre l'appli depuis sa nouvelle icône.</li></ol></span>${close}</div>`;
+  }
   return "";
 }
 function bindInstall() {
   const b = document.getElementById("installBtn");
   if (b) b.onclick = async () => { installEvt.prompt(); await installEvt.userChoice; installEvt = null; render(); };
+  const x = document.getElementById("installClose");
+  if (x) x.onclick = () => { store.set("installSnooze", Date.now() + INSTALL_SNOOZE_DAYS * 864e5); render(); toast("D'accord, on te le reproposera plus tard. C'est aussi dans Mon compte."); };
 }
 window.addEventListener("beforeinstallprompt", e => { e.preventDefault(); installEvt = e; if (sb) render(); });
+window.addEventListener("appinstalled", () => { installEvt = null; if (sb) render(); });
 
 /* ============ Mon compte ============ */
 /* Changements d'équipe */
@@ -743,6 +760,7 @@ function homeView() {
   const news = [...(D.news || [])].sort((a, b) => (b.pinned - a.pinned) || b.created_at.localeCompare(a.created_at));
   const tile = (attr, big, label, warn) => `<button class="card" ${attr} style="text-align:left;display:flex;flex-direction:column;gap:2px;${warn ? "border-color:var(--gold)" : ""}"><span style="font-family:var(--display);font-size:24px;font-weight:800;line-height:1">${big}</span><span class="muted" style="font-size:13px">${label}</span></button>`;
   return `<div class="row" style="gap:12px"><img src="icons/logo.webp" alt="" style="width:64px;height:64px;border-radius:12px"><div><div class="eyebrow">Bonjour</div><h2 style="font-size:22px">${esc(first(me.full_name) || "et bienvenue")}</h2></div></div>
+    ${installCard(true)}
     ${!PV(me.id).gender || !PV(me.id).phone || PV(me.id).image_consent == null || childrenOf(me.id).some(c => !PV(c.id).gender || !PV(c.id).emergency_phone || PV(c.id).image_consent == null) ? `<button class="card" data-tab="account" style="text-align:left;border-color:var(--gold);display:flex;flex-direction:column;gap:4px"><b>Complète ta fiche</b><span class="muted" style="font-size:13px">Indique ${me.role === "parent" ? "ton téléphone, le sexe de chaque enfant, le droit à l'image, le responsable légal et la personne à contacter en cas de problème" : "si tu es une femme ou un homme, ton téléphone et ton accord pour la publication de ton image"}.</span><span style="font-weight:700;color:var(--accent)">Compléter ›</span></button>` : ""}
     <div class="grid2">
       ${tile('data-tab="chats"', un, un > 1 ? "messages non lus" : "message non lu", un > 0)}

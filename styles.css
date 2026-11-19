@@ -161,7 +161,11 @@ button.seen{cursor:pointer;text-decoration:underline dotted;text-underline-offse
 .loading{display:grid;place-items:center;min-height:60vh;color:var(--muted)}
 .danger{background:var(--accent-soft);color:var(--accent)}
 .offline{background:var(--warn-soft);color:var(--warn);font-size:13px;font-weight:600;text-align:center;padding:6px}
-.install{display:flex;gap:10px;align-items:center}
+.install{display:flex;gap:10px;align-items:center;position:relative}
+.install-ios{align-items:flex-start;border-color:var(--gold)}
+.install-steps{margin:6px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:3px}
+.install-steps svg{color:var(--accent)}
+.install-x{border:0;background:var(--surface-2);color:var(--muted);width:28px;height:28px;border-radius:50%;font-size:18px;line-height:1;flex:none;display:grid;place-items:center;align-self:flex-start}
 a{color:var(--accent)}
 body{margin:0;padding-top:env(safe-area-inset-top,0px);-webkit-tap-highlight-color:transparent}
 img{max-width:100%}
