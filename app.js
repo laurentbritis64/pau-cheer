@@ -170,15 +170,23 @@ const teamChip = id => { const t = T(id); return `<span class="chip" style="padd
 
 /* Conversations */
 const dmPair = other => [me.id, other].sort();
-// Groupe « Coachs » : tous les coachs et le bureau
+// Groupes avec les coachs : « coachs » (tous les coachs et le bureau)
+// et « coachs.<équipe> » (athlètes de l'équipe, ses coachs et le bureau, sans les parents)
 const inCoachGroup = () => !!me && (me.role === "coach" || me.role === "bureau" || coachTeamsOf(me.id).length > 0);
+function athCoachTeams() {
+  if (!me) return [];
+  const l = isBureau() ? D.teams.map(t => t.id) : [...coachTeamsOf(me.id), ...(isAth(me) && me.team_id ? [me.team_id] : [])];
+  return [...new Set(l)].filter(t => T(t).active !== false).sort((a, b) => T(a).position - T(b).position);
+}
+function myGroups() { return [...athCoachTeams().map(t => "grp:coachs." + t), ...(inCoachGroup() ? ["grp:coachs"] : [])]; }
+const grpTeam = key => key.startsWith("grp:coachs.") ? key.slice(11) : null;
 function convOf(m) { return m.grp ? "grp:" + m.grp : m.team_id ? "team:" + m.team_id : "dm:" + (m.dm_a === me.id ? m.dm_b : m.dm_a); }
 // Préférences de chacun : conversation archivée, ou vidée « pour moi »
 const prefOf = key => (D.prefs || []).find(p => p.user_id === me.id && p.conv === srvConv(key)) || {};
 const clearedAt = key => prefOf(key).cleared_at ? tms(prefOf(key).cleared_at) : 0;
 function msgsOf(key) { const c = clearedAt(key), h = prefOf(key).hidden || []; return D.msgs.filter(m => convOf(m) === key && (!c || tms(m.created_at) > c) && !h.includes(m.id)).sort((a, b) => a.created_at.localeCompare(b.created_at)); }
 function isArchived(key) { const a = prefOf(key).archived_at; if (!a) return false; const l = lastOf(key); return !l || tms(l.created_at) <= tms(a); }
-const canWipe = key => key.startsWith("dm:") || isBureau() || !key.startsWith("grp:") && (me.role === "coach" && coachTeamsOf(me.id).includes(key.slice(5)));
+const canWipe = key => key.startsWith("dm:") || isBureau() || (me.role === "coach" && coachTeamsOf(me.id).includes(grpTeam(key) || (key.startsWith("team:") ? key.slice(5) : "")));
 async function savePref(key, patch) {
   const cur = prefOf(key), row = { user_id: me.id, conv: srvConv(key), archived_at: cur.archived_at || null, cleared_at: cur.cleared_at || null, ...patch };
   if (cur.hidden && cur.hidden.length && !("hidden" in patch)) row.hidden = cur.hidden;
@@ -239,7 +247,7 @@ function dmPartners() {
 function totalUnread() {
   let n = 0;
   for (const t of myTeams()) n += unreadIn("team:" + t);
-  if (inCoachGroup()) n += unreadIn("grp:coachs");
+  for (const k of myGroups()) n += unreadIn(k);
   const seen = new Set(D.msgs.filter(m => !m.team_id && !m.grp).map(convOf));
   for (const k of seen) n += unreadIn(k);
   return n;
@@ -1171,18 +1179,18 @@ function chatsView() {
   let partners = Object.values(D.P).filter(p => p.id !== me.id && (withMsgs.has(p.id) || always.includes(p.id)));
   partners.sort((a, b) => ((lastOf("dm:" + b.id) || {}).created_at || "").localeCompare((lastOf("dm:" + a.id) || {}).created_at || ""));
   const dmRows = partners.filter(p => !isArchived("dm:" + p.id)).map(dmRow).join("") || `<div class="item muted">Aucune conversation privée pour l'instant.</div>`;
-  const grpRow = () => {
-    const key = "grp:coachs", m = lastOf(key), n = unreadIn(key);
-    return `<button class="item" data-conv="${key}"><span class="gico" style="background:var(--gold)">C</span>
-      <span class="txt"><span class="t1">Groupe Coachs${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? preview(m) : "Tous les coachs et le bureau")}</span></span>
+  const grpRow = key => {
+    const m = lastOf(key), n = unreadIn(key), t = grpTeam(key), tm = t ? T(t) : null;
+    return `<button class="item" data-conv="${key}"><span class="gico" style="background:${tm ? tm.color : "var(--gold)"}">C</span>
+      <span class="txt"><span class="t1">${tm ? "Athlètes &amp; coachs " + esc(tm.name) : "Groupe Coachs"}${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? preview(m) : tm ? "Athlètes et coachs de l'équipe, sans les parents" : "Tous les coachs et le bureau")}</span></span>
       <span class="when">${m ? fmtTs(m.created_at) : ""}</span></button>`;
   };
-  const grp = inCoachGroup() ? (isArchived("grp:coachs") ? "" : grpRow()) : "";
-  const arch = [...(inCoachGroup() && isArchived("grp:coachs") ? [grpRow()] : []), ...teams.filter(t => isArchived("team:" + t)).map(teamRow), ...partners.filter(p => isArchived("dm:" + p.id)).map(dmRow)];
+  const groups = myGroups(), grp = groups.filter(k => !isArchived(k)).map(grpRow).join("");
+  const arch = [...groups.filter(isArchived).map(grpRow), ...teams.filter(t => isArchived("team:" + t)).map(teamRow), ...partners.filter(p => isArchived("dm:" + p.id)).map(dmRow)];
   return `
     <div class="eyebrow">${me.role === "athlete" ? "Mon équipe" : me.role === "parent" ? "Équipes de mes enfants" : "Toutes les équipes"}</div>
     <div class="list">${teamRows}</div>
-    ${grp ? `<div class="eyebrow">Encadrement</div><div class="list">${grp}</div>` : ""}
+    ${grp ? `<div class="eyebrow">Avec les coachs</div><div class="list">${grp}</div>` : ""}
     <div class="row" style="justify-content:space-between"><div class="eyebrow">Messages privés</div><button class="btn small" data-contacts>💬 Écrire à quelqu'un</button></div>
     <div class="list">${dmRows}</div>
     ${arch.length ? `<details class="stack" ${S.showArch ? "open" : ""} data-archbox><summary class="eyebrow" style="cursor:pointer">🗄️ Conversations archivées (${arch.length})</summary><div class="list" style="margin-top:8px">${arch.join("")}</div></details>` : ""}
@@ -1218,8 +1226,10 @@ function convView(key) {
   let title, note;
   if (type === "team") { const t = T(id); title = "Équipe " + t.name; note = `<div class="notice">${I.user}<span>Groupe de l'équipe ${esc(t.name)} : athlètes, parents et bureau.</span></div>`; }
   else if (type === "grp") {
-    if (!inCoachGroup()) return { title: "Groupe Coachs", body: `<div class="empty">Ce groupe est réservé aux coachs et au bureau.</div>`, composer: "" };
-    title = "Groupe Coachs"; note = `<div class="notice">${I.lock}<span>Groupe réservé aux <b>coachs</b> et au <b>bureau</b>. Les athlètes et les parents ne le voient pas.</span></div>`;
+    const t = grpTeam(key), tm = t ? T(t) : null;
+    title = tm ? "Athlètes & coachs " + tm.name : "Groupe Coachs";
+    if (!myGroups().includes(key)) return { title, body: `<div class="empty">Tu ne fais pas partie de ce groupe.</div>`, composer: "" };
+    note = `<div class="notice">${I.lock}<span>${tm ? `Groupe des <b>athlètes</b> et des <b>coachs</b> de l'équipe ${esc(tm.name)}, avec le bureau. Les parents ne le voient pas.` : "Groupe réservé aux <b>coachs</b> et au <b>bureau</b>. Les athlètes et les parents ne le voient pas."}</span></div>`;
   }
   else { const p = P(id); title = p.full_name; note = `<div class="notice">${I.lock}<span>Conversation privée avec <b>${esc(p.full_name)}</b> (${esc(roleLabel(p))}).</span></div>`; }
   markRead(key);
@@ -1233,7 +1243,7 @@ function convView(key) {
     <span class="muted" style="font-size:12.5px">Touche un message pour le supprimer.</span>
     ${ask ? `<div class="stack" style="gap:8px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface-2)">
       <span style="font-size:13.5px">${ask === "clear" ? "<b>Vider cette conversation pour toi ?</b> Les messages actuels disparaissent seulement de ton téléphone et de ton compte. Les autres les voient toujours."
-        : `<b>Supprimer tous les messages pour tout le monde ?</b> ${key.startsWith("team:") ? "Toute l'équipe" : key.startsWith("grp:") ? "Tous les coachs" : "L'autre personne"} ne les verra plus non plus, et les fichiers joints sont effacés. C'est définitif.`}</span>
+        : `<b>Supprimer tous les messages pour tout le monde ?</b> ${key.startsWith("team:") ? "Toute l'équipe" : key.startsWith("grp:") ? "Tout le groupe" : "L'autre personne"} ne les verra plus non plus, et les fichiers joints sont effacés. C'est définitif.`}</span>
       <div class="row" style="gap:8px"><button type="button" class="btn small" data-convdo="${key}|${ask}" style="${ask === "wipe" ? "background:#c43c3c;color:#fff" : ""}">${ask === "clear" ? "Vider pour moi" : "Supprimer pour tout le monde"}</button><button type="button" class="btn small ghost" data-convask="">Annuler</button></div></div>` : ""}`;
   const body = `${note}${tools}<div class="chat">${list.map(m => {
     const a = P(m.sender_id), mine = m.sender_id === me.id;
