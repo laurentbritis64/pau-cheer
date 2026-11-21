@@ -170,23 +170,32 @@ const teamChip = id => { const t = T(id); return `<span class="chip" style="padd
 
 /* Conversations */
 const dmPair = other => [me.id, other].sort();
-// Groupes avec les coachs : « coachs » (tous les coachs et le bureau)
-// et « coachs.<équipe> » (athlètes de l'équipe, ses coachs et le bureau, sans les parents)
+// Conversations avec les coachs :
+//   « grp:coachs »    : tous les coachs et le bureau
+//   « grp:ath.<id> »  : un athlète, les coachs de son équipe et le bureau (les autres athlètes ne la voient pas)
 const inCoachGroup = () => !!me && (me.role === "coach" || me.role === "bureau" || coachTeamsOf(me.id).length > 0);
-function athCoachTeams() {
-  if (!me) return [];
-  const l = isBureau() ? D.teams.map(t => t.id) : [...coachTeamsOf(me.id), ...(isAth(me) && me.team_id ? [me.team_id] : [])];
-  return [...new Set(l)].filter(t => T(t).active !== false).sort((a, b) => T(a).position - T(b).position);
+const grpAth = key => key.startsWith("grp:ath.") ? key.slice(8) : null;
+// Puis-je voir la conversation « Mes coachs » de cet athlète ?
+function canSeeAthConv(id) {
+  if (!me) return false;
+  if (id === me.id) return isAth(me) && !!me.team_id;
+  const a = P(id); return isBureau() || (!!a.team_id && coachTeamsOf(me.id).includes(a.team_id));
 }
-function myGroups() { return [...athCoachTeams().map(t => "grp:coachs." + t), ...(inCoachGroup() ? ["grp:coachs"] : [])]; }
-const grpTeam = key => key.startsWith("grp:coachs.") ? key.slice(11) : null;
+function myGroups() {
+  const l = inCoachGroup() ? ["grp:coachs"] : [];
+  if (isAth(me) && me.team_id) l.push("grp:ath." + me.id);
+  // Coachs et bureau : les conversations d'athlètes déjà commencées
+  const started = [...new Set(D.msgs.filter(m => m.grp && m.grp.startsWith("ath.") && m.grp.slice(4) !== me.id).map(m => "grp:" + m.grp))].filter(k => canSeeAthConv(grpAth(k)) && msgsOf(k).length);
+  started.sort((a, b) => ((lastOf(b) || {}).created_at || "").localeCompare((lastOf(a) || {}).created_at || ""));
+  return [...l, ...started];
+}
 function convOf(m) { return m.grp ? "grp:" + m.grp : m.team_id ? "team:" + m.team_id : "dm:" + (m.dm_a === me.id ? m.dm_b : m.dm_a); }
 // Préférences de chacun : conversation archivée, ou vidée « pour moi »
 const prefOf = key => (D.prefs || []).find(p => p.user_id === me.id && p.conv === srvConv(key)) || {};
 const clearedAt = key => prefOf(key).cleared_at ? tms(prefOf(key).cleared_at) : 0;
 function msgsOf(key) { const c = clearedAt(key), h = prefOf(key).hidden || []; return D.msgs.filter(m => convOf(m) === key && (!c || tms(m.created_at) > c) && !h.includes(m.id)).sort((a, b) => a.created_at.localeCompare(b.created_at)); }
 function isArchived(key) { const a = prefOf(key).archived_at; if (!a) return false; const l = lastOf(key); return !l || tms(l.created_at) <= tms(a); }
-const canWipe = key => key.startsWith("dm:") || isBureau() || (me.role === "coach" && coachTeamsOf(me.id).includes(grpTeam(key) || (key.startsWith("team:") ? key.slice(5) : "")));
+const canWipe = key => key.startsWith("dm:") || isBureau() || (me.role === "coach" && coachTeamsOf(me.id).includes(key.startsWith("team:") ? key.slice(5) : grpAth(key) ? P(grpAth(key)).team_id : ""));
 async function savePref(key, patch) {
   const cur = prefOf(key), row = { user_id: me.id, conv: srvConv(key), archived_at: cur.archived_at || null, cleared_at: cur.cleared_at || null, ...patch };
   if (cur.hidden && cur.hidden.length && !("hidden" in patch)) row.hidden = cur.hidden;
@@ -1180,9 +1189,11 @@ function chatsView() {
   partners.sort((a, b) => ((lastOf("dm:" + b.id) || {}).created_at || "").localeCompare((lastOf("dm:" + a.id) || {}).created_at || ""));
   const dmRows = partners.filter(p => !isArchived("dm:" + p.id)).map(dmRow).join("") || `<div class="item muted">Aucune conversation privée pour l'instant.</div>`;
   const grpRow = key => {
-    const m = lastOf(key), n = unreadIn(key), t = grpTeam(key), tm = t ? T(t) : null;
-    return `<button class="item" data-conv="${key}"><span class="gico" style="background:${tm ? tm.color : "var(--gold)"}">C</span>
-      <span class="txt"><span class="t1">${tm ? "Athlètes &amp; coachs " + esc(tm.name) : "Groupe Coachs"}${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? preview(m) : tm ? "Athlètes et coachs de l'équipe, sans les parents" : "Tous les coachs et le bureau")}</span></span>
+    const m = lastOf(key), n = unreadIn(key), a = grpAth(key), mine = a === me.id, tm = a ? T(P(a).team_id) : null;
+    const name = !a ? "Groupe Coachs" : mine ? "Mes coachs" : P(a).full_name + " ↔ coachs";
+    const sub = !a ? "Tous les coachs et le bureau" : mine ? "Les coachs de ton équipe" + (tm ? " " + tm.name : "") + ", rien que pour toi" : "Coachs " + (tm ? tm.name : "");
+    return `<button class="item" data-conv="${key}">${a && !mine ? avatar(P(a), 40) : `<span class="gico" style="background:${tm ? tm.color : "var(--gold)"}">C</span>`}
+      <span class="txt"><span class="t1">${esc(name)}${n ? `<span class="tag comp">${n}</span>` : ""}</span><span class="t2">${esc(m ? preview(m) : sub)}</span></span>
       <span class="when">${m ? fmtTs(m.created_at) : ""}</span></button>`;
   };
   const groups = myGroups(), grp = groups.filter(k => !isArchived(k)).map(grpRow).join("");
@@ -1226,10 +1237,12 @@ function convView(key) {
   let title, note;
   if (type === "team") { const t = T(id); title = "Équipe " + t.name; note = `<div class="notice">${I.user}<span>Groupe de l'équipe ${esc(t.name)} : athlètes, parents et bureau.</span></div>`; }
   else if (type === "grp") {
-    const t = grpTeam(key), tm = t ? T(t) : null;
-    title = tm ? "Athlètes & coachs " + tm.name : "Groupe Coachs";
-    if (!myGroups().includes(key)) return { title, body: `<div class="empty">Tu ne fais pas partie de ce groupe.</div>`, composer: "" };
-    note = `<div class="notice">${I.lock}<span>${tm ? `Groupe des <b>athlètes</b> et des <b>coachs</b> de l'équipe ${esc(tm.name)}, avec le bureau. Les parents ne le voient pas.` : "Groupe réservé aux <b>coachs</b> et au <b>bureau</b>. Les athlètes et les parents ne le voient pas."}</span></div>`;
+    const a = grpAth(key), mine = a === me.id, tm = a ? T(P(a).team_id) : null;
+    title = !a ? "Groupe Coachs" : mine ? "Mes coachs" : P(a).full_name + " ↔ coachs";
+    if (a ? !canSeeAthConv(a) : !inCoachGroup()) return { title, body: `<div class="empty">Tu ne fais pas partie de cette conversation.</div>`, composer: "" };
+    note = `<div class="notice">${I.lock}<span>${!a ? "Groupe réservé aux <b>coachs</b> et au <b>bureau</b>. Les athlètes et les parents ne le voient pas."
+      : mine ? `Ta conversation avec <b>les coachs de ton équipe</b>${tm ? " " + esc(tm.name) : ""} (et le bureau). Les autres athlètes et les parents ne la voient pas.`
+      : `Conversation de <b>${esc(P(a).full_name)}</b> avec les coachs de son équipe${tm ? " " + esc(tm.name) : ""} et le bureau. Les autres athlètes et les parents ne la voient pas.`}</span></div>`;
   }
   else { const p = P(id); title = p.full_name; note = `<div class="notice">${I.lock}<span>Conversation privée avec <b>${esc(p.full_name)}</b> (${esc(roleLabel(p))}).</span></div>`; }
   markRead(key);
@@ -1243,7 +1256,7 @@ function convView(key) {
     <span class="muted" style="font-size:12.5px">Touche un message pour le supprimer.</span>
     ${ask ? `<div class="stack" style="gap:8px;border:1px solid var(--line);border-radius:12px;padding:10px 12px;background:var(--surface-2)">
       <span style="font-size:13.5px">${ask === "clear" ? "<b>Vider cette conversation pour toi ?</b> Les messages actuels disparaissent seulement de ton téléphone et de ton compte. Les autres les voient toujours."
-        : `<b>Supprimer tous les messages pour tout le monde ?</b> ${key.startsWith("team:") ? "Toute l'équipe" : key.startsWith("grp:") ? "Tout le groupe" : "L'autre personne"} ne les verra plus non plus, et les fichiers joints sont effacés. C'est définitif.`}</span>
+        : `<b>Supprimer tous les messages pour tout le monde ?</b> ${key.startsWith("team:") ? "Toute l'équipe" : key.startsWith("grp:") ? "Tout le monde dans cette conversation" : "L'autre personne"} ne les verra plus non plus, et les fichiers joints sont effacés. C'est définitif.`}</span>
       <div class="row" style="gap:8px"><button type="button" class="btn small" data-convdo="${key}|${ask}" style="${ask === "wipe" ? "background:#c43c3c;color:#fff" : ""}">${ask === "clear" ? "Vider pour moi" : "Supprimer pour tout le monde"}</button><button type="button" class="btn small ghost" data-convask="">Annuler</button></div></div>` : ""}`;
   const body = `${note}${tools}<div class="chat">${list.map(m => {
     const a = P(m.sender_id), mine = m.sender_id === me.id;
@@ -1621,6 +1634,7 @@ function memberView(id) {
     ${role === "athlete" ? `<p class="muted" style="margin:0;font-size:13px">Parents reliés : ${parentsOf(id).map(x => esc(x.full_name)).join(", ") || "aucun pour l'instant (à faire depuis la fiche du parent)"}.</p>` : ""}
     <button class="btn">Enregistrer</button>
     ${p.managed ? "" : `<button type="button" class="btn ghost" data-conv="dm:${id}">Envoyer un message privé</button>`}
+    ${!p.managed && isAth(p) && p.id !== me.id && canSeeAthConv(p.id) ? `<button type="button" class="btn ghost" data-conv="grp:ath.${id}">Conversation avec les coachs de son équipe</button>` : ""}
     ${kidLike(p) ? `<button type="button" class="btn ghost" data-mergefrom="${id}">Fusionner avec une fiche en double</button>` : ""}
   </form>`;
 }
