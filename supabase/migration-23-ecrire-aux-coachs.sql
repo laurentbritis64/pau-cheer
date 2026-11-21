@@ -1,40 +1,52 @@
 -- =====================================================================
--- Mise à jour 22 : groupes de tchat avec les coachs
---   * « Athlètes & coachs » d'une équipe : les athlètes de l'équipe, ses coachs et le bureau
---     (sans les parents, qui ont déjà le groupe de l'équipe).
+-- Mise à jour 23 : écrire aux coachs
+--   * « Mes coachs » : chaque athlète a SA conversation avec les coachs de son équipe
+--     (et le bureau). Les autres athlètes et les parents ne la voient pas.
 --   * « Groupe Coachs » : tous les coachs et le bureau, pour se parler entre encadrants.
+-- Remplace la mise à jour 22 (groupes « Athlètes & coachs » par équipe, abandonnés).
+-- À lancer que la 22 ait été lancée ou non : celle-ci contient tout.
 -- À coller dans Supabase > SQL Editor > New query > Run
 -- Peut être relancée sans risque.
 -- =====================================================================
 
 -- ---------- Le groupe : une nouvelle colonne sur les messages ----------
 alter table public.messages add column if not exists grp text;
+-- Les anciens groupes par équipe de la mise à jour 22 disparaissent
+delete from public.messages where grp like 'coachs.%';
+delete from public.chat_reads where conv like 'grp:coachs.%';
+delete from public.chat_prefs where conv like 'grp:coachs.%';
 alter table public.messages drop constraint if exists message_target;
 alter table public.messages add constraint message_target check (
   (team_id is not null and dm_a is null and dm_b is null and grp is null) or
   (team_id is null and dm_a is not null and dm_b is not null and dm_a < dm_b and grp is null) or
-  (team_id is null and dm_a is null and dm_b is null and grp ~ '^coachs(\.[a-z0-9_-]+)?$')
+  (team_id is null and dm_a is null and dm_b is null and grp ~ '^(coachs|ath\.[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$')
 );
 create index if not exists messages_grp_idx on public.messages(grp, created_at);
 
--- Les personnes d'un groupe
---   'coachs'          : tous les coachs et le bureau
---   'coachs.<équipe>' : les athlètes de l'équipe, ses coachs et le bureau
+-- Les personnes d'une conversation de groupe
+--   'coachs'     : tous les coachs et le bureau
+--   'ath.<id>'   : l'athlète, les coachs de son équipe et le bureau (ni les autres athlètes, ni les parents)
 create or replace function public.group_people(g text) returns setof uuid
-language sql stable security definer set search_path = public as $$
-  select id from profiles where role = 'bureau' and (g = 'coachs' or substr(g, 8) in (select id from teams))
-  union select id from profiles where g = 'coachs' and role = 'coach'
-  union select ct.coach_id from coach_teams ct join profiles p on p.id = ct.coach_id
-         where p.role <> 'pending' and (g = 'coachs' or ct.team_id = substr(g, 8))
-  union select id from profiles where g like 'coachs.%' and team_id = substr(g, 8)
-         and role in ('athlete', 'coach', 'bureau');
-$$;
+language plpgsql stable security definer set search_path = public as $$
+declare a uuid; t text;
+begin
+  if g = 'coachs' then
+    return query select id from profiles where role in ('coach', 'bureau')
+      union select ct.coach_id from coach_teams ct join profiles p on p.id = ct.coach_id where p.role <> 'pending';
+  elsif g ~ '^ath\.[0-9a-f-]{36}$' then
+    a := substr(g, 5)::uuid;
+    select team_id into t from profiles where id = a and role <> 'pending';
+    return query select a where t is not null
+      union select ct.coach_id from coach_teams ct join profiles p on p.id = ct.coach_id
+             where ct.team_id = t and p.role <> 'pending'
+      union select id from profiles where role = 'bureau';
+  end if;
+end $$;
 
--- Fait partie du groupe
+-- Fait partie de la conversation
 create or replace function public.in_group(g text) returns boolean
 language sql stable security definer set search_path = public as $$
-  select is_member() and (g = 'coachs' or g like 'coachs.%')
-     and auth.uid() in (select group_people(g));
+  select is_member() and auth.uid() in (select group_people(g));
 $$;
 
 -- ---------- Lire et écrire ----------
@@ -73,14 +85,15 @@ exception when others then
   return false;
 end $$;
 
--- Un groupe avec les coachs : vidé pour tout le monde par le bureau, ou par un coach de l'équipe
+-- Vidé pour tout le monde : par le bureau, ou (conversation d'un athlète) par un coach de son équipe
 create or replace function public.can_wipe_conv(c text) returns boolean
 language sql stable security definer set search_path = public as $$
   select is_member() and (
     (c like 'team:%' and (is_bureau() or exists(select 1 from coach_teams ct join profiles p on p.id = ct.coach_id and p.role = 'coach'
                                                  where ct.coach_id = auth.uid() and ct.team_id = substr(c, 6))))
-    or (c like 'grp:%' and (is_bureau() or (c like 'grp:coachs.%' and exists(select 1 from coach_teams ct join profiles p on p.id = ct.coach_id and p.role = 'coach'
-                                                 where ct.coach_id = auth.uid() and ct.team_id = substr(c, 12)))))
+    or (c like 'grp:%' and (is_bureau() or (c like 'grp:ath.%' and exists(select 1 from coach_teams ct join profiles p on p.id = ct.coach_id and p.role = 'coach'
+                                                 join profiles a on a.team_id = ct.team_id and a.id::text = substr(c, 9)
+                                                 where ct.coach_id = auth.uid()))))
     or (c like 'dm:%' and auth.uid()::text = any(string_to_array(substr(c, 4), '_'))));
 $$;
 
@@ -105,7 +118,7 @@ end $$;
 revoke execute on function public.delete_conv(text) from public, anon;
 grant execute on function public.delete_conv(text) to authenticated;
 
--- ---------- Fichiers joints (dossier chat/grp/coachs) ----------
+-- ---------- Fichiers joints (dossier chat/grp/…) ----------
 create or replace function public.can_access_file(path text) returns boolean
 language plpgsql stable security definer set search_path = public as $$
 declare parts text[] := string_to_array(path, '/'); who uuid;
@@ -154,7 +167,7 @@ begin
   elsif new.grp is not null then
     perform push_send(array(select group_people(new.grp)),
       case when new.grp = 'coachs' then 'Groupe Coachs'
-           else 'Athlètes & coachs ' || coalesce((select name from teams where id = substr(new.grp, 8)), '') end,
+           else 'Coachs · ' || coalesce((select full_name from profiles where id::text = substr(new.grp, 5)), '') end,
       who || ' : ' || txt, './#chat=grp:' || new.grp, 'grp:' || new.grp);
   else
     perform push_send(array[case when new.sender_id = new.dm_a then new.dm_b else new.dm_a end],
