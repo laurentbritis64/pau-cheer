@@ -370,7 +370,7 @@ async function start() {
 async function q(promise) { const { data, error } = await promise; if (error) throw error; return data || []; }
 async function loadAll() {
   const since = addDays(todayIso(), -1);
-  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs, prefs, boards, shifts, births] = await Promise.all([
+  const [teams, profs, links, events, evTeams, trips, steps, legs, items, presence, packed, perso, docs, msgs, coachTeams, attendance, news, privs, teamReqs, reads, linkReqs, prefs, boards, shifts, births] = await Promise.all([
     q(sb.from("teams").select("*").order("position")),
     q(sb.from("profiles").select(PCOLS)),
     q(sb.from("parent_links").select("*")),
@@ -382,6 +382,7 @@ async function loadAll() {
     q(sb.from("trip_items").select("*").order("position")),
     q(sb.from("trip_presence").select("*")),
     q(sb.from("trip_packed").select("*")),
+    q(sb.from("trip_personal_items").select("*").order("position")).catch(() => []),
     q(sb.from("documents").select("*").order("created_at")),
     q(sb.from("messages").select("*").order("created_at", { ascending: false }).limit(600)),
     q(sb.from("coach_teams").select("*")).catch(() => []),
@@ -400,7 +401,7 @@ async function loadAll() {
   births.forEach(b => { if (Pm[b.id]) Pm[b.id].birth_date = b.birth_date; if (b.id === me.id) me.birth_date = b.birth_date; });
   const evT = {}; evTeams.forEach(x => (evT[x.event_id] = evT[x.event_id] || []).push(x.team_id));
   events.forEach(e => e.teams = (evT[e.id] || []).sort((a, b) => (teams.find(t => t.id === a) || {}).position - (teams.find(t => t.id === b) || {}).position));
-  D = { teams: teams.filter(t => t.active !== false), allTeams: teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs, prefs, boards, shifts };
+  D = { teams: teams.filter(t => t.active !== false), allTeams: teams, P: Pm, links, events, trips, steps, legs, items, presence, packed, perso, docs, msgs, coachTeams, attendance, news, sum: {}, priv: Object.fromEntries(privs.map(x => [x.id, x])), teamReqs, reads, linkReqs, prefs, boards, shifts };
   await loadSummary();
 }
 // Nombre de présents par événement (tout le monde est présent sauf absence déclarée)
@@ -1333,6 +1334,16 @@ function concerned(tr) {
   const e = eventOf(tr); if (!e) return [];
   return myAthletes().filter(a => e.teams.includes(a.team_id));
 }
+function persoOf(tid, aid) { return D.perso.filter(p => p.trip_id === tid && p.athlete_id === aid).sort((a, b) => a.position - b.position); }
+// Liste officielle : sections « En cabine » / « En soute » (seulement si au moins une affaire est classée)
+const ZONES = [["cabine", "✈️ En cabine · dans l'avion"], ["soute", "🧳 En soute"]];
+function zoned(items, row) {
+  if (!items.some(i => i.zone)) return `<div>${items.map(row).join("")}</div>`;
+  return ZONES.concat([[null, "Autres affaires"]]).map(([z, lbl]) => { const l = items.filter(i => (i.zone || null) === z);
+    return l.length ? `<div class="eyebrow" style="margin-top:8px">${lbl}</div><div>${l.map(row).join("")}</div>` : ""; }).join("");
+}
+const zoneSelect = (id, cur, attr) => `<select ${id ? `id="${id}"` : ""} ${attr || ""} class="search" style="width:auto;flex:none;padding:8px" aria-label="Section">
+  <option value="" ${!cur ? "selected" : ""}>Sans section</option>${ZONES.map(([z, l]) => `<option value="${z}" ${cur === z ? "selected" : ""}>${z === "cabine" ? "✈️ Cabine" : "🧳 Soute"}</option>`).join("")}</select>`;
 function presenceOf(tid, aid) { const p = D.presence.find(x => x.trip_id === tid && x.athlete_id === aid); return p && p.status; }
 function packedOf(tid, aid) { const ids = new Set(itemsOf(tid).map(i => i.id)); return D.packed.filter(p => p.athlete_id === aid && ids.has(p.item_id)).map(p => p.item_id); }
 function tripsView() {
@@ -1418,27 +1429,45 @@ function bringBlock(tr) {
     const e = eventOf(tr), ath = athletes().filter(a => e.teams.includes(a.team_id));
     const ready = ath.filter(a => t && packedOf(id, a.id).length === t).length;
     // Un membre du bureau qui a un enfant (ou qui est athlète) coche aussi son propre sac
-    return (concerned(tr).length && t ? packBlock(tr) : "") + `<div class="card stack"><h2>${concerned(tr).length ? "Liste du déplacement" : "À emporter"}</h2>
-      <p class="muted" style="margin:0;font-size:13px">Chaque athlète ou parent coche ces cases en préparant le sac. Tu peux ajouter ou retirer des affaires.</p>
-      <div>${items.map(i => `<div class="check"><input type="checkbox" disabled aria-hidden="true" tabindex="-1"><span>${esc(i.label)}</span><button class="x" data-delitem="${i.id}" aria-label="Retirer ${esc(i.label)}">×</button></div>`).join("") || '<div class="muted">Aucune affaire dans la liste.</div>'}</div>
-      <form id="addbring" class="row" style="gap:6px"><input id="brTxt" class="search" placeholder="Ex : Crème solaire, coussin…" aria-label="Nouvelle affaire"><button class="btn small">Ajouter</button></form>
+    return (concerned(tr).length ? packBlock(tr) : "") + `<div class="card stack"><h2>${concerned(tr).length ? "Liste du déplacement" : "À emporter"}</h2>
+      <p class="muted" style="margin:0;font-size:13px">Chaque athlète ou parent coche ces cases en préparant le sac. Tu peux ajouter ou retirer des affaires, et les ranger « En cabine » (dans l'avion) ou « En soute ».</p>
+      ${t ? zoned(items, i => `<div class="check"><input type="checkbox" disabled aria-hidden="true" tabindex="-1"><span style="flex:1;min-width:0">${esc(i.label)}</span>${zoneSelect("", i.zone, `data-itemzone="${i.id}"`)}<button class="x" style="margin-left:0" data-delitem="${i.id}" aria-label="Retirer ${esc(i.label)}">×</button></div>`) : '<div class="muted">Aucune affaire dans la liste.</div>'}
+      ${addBring("Ex : Crème solaire, coussin…")}
       <div class="eyebrow" style="margin-top:6px">Sacs prêts : ${ready}/${ath.length}</div>
       ${ath.map(a => { const n = packedOf(id, a.id).length; return `<div class="row" style="font-size:13.5px"><span style="flex:1;min-width:0">${esc(a.full_name)}</span><span class="bar" style="width:90px"><i style="width:${t ? n / t * 100 : 0}%"></i></span><span style="width:34px;text-align:right;font-variant-numeric:tabular-nums">${n}/${t}</span></div>`; }).join("")}
     </div>`;
   }
   return packBlock(tr);
 }
+function addBring(ph) {
+  return `<form id="addbring" class="row" style="gap:6px;flex-wrap:wrap"><input id="brTxt" class="search" style="flex:1;min-width:150px" placeholder="${ph}" aria-label="Nouvelle affaire">${zoneSelect("brZone", S.brZone)}<button class="btn small">Ajouter</button></form>`;
+}
 function packBlock(tr) {
   const id = tr.id, items = itemsOf(id), t = items.length;
-  const c = concerned(tr); if (!c.length || !t) return "";
+  const c = concerned(tr); if (!c.length) return "";
   const sel = c.find(a => a.id === S.packFor) || c[0];
   const done = new Set(packedOf(id, sel.id)), n = done.size;
+  if (!t) return (c.length > 1 ? `<div class="packtabs">${c.map(a => `<button class="chip" data-packfor="${a.id}" aria-pressed="${a.id === sel.id}">${esc(first(a.full_name))}</button>`).join("")}</div>` : "") + persoBlock(tr, sel);
   return `<div class="card stack"><div class="row" style="justify-content:space-between"><h2>À emporter</h2>${n === t ? '<span class="tag ok">Sac prêt ✓</span>' : `<span class="tag warn">${t - n} à préparer</span>`}</div>
     ${c.length > 1 ? `<div class="packtabs">${c.map(a => `<button class="chip" data-packfor="${a.id}" aria-pressed="${a.id === sel.id}">Sac de ${esc(first(a.full_name))} · ${packedOf(id, a.id).length}/${t}</button>`).join("")}</div>` : ""}
     <div class="row" style="gap:10px"><span class="bar" style="flex:1"><i style="width:${n / t * 100}%"></i></span><span style="font-weight:700;font-variant-numeric:tabular-nums">${n}/${t}</span></div>
-    <div>${items.map(i => `<label class="check ${done.has(i.id) ? "done" : ""}"><input type="checkbox" data-pack="${sel.id}|${i.id}" ${done.has(i.id) ? "checked" : ""}><span>${esc(i.label)}</span></label>`).join("")}</div>
+    ${zoned(items, i => `<label class="check ${done.has(i.id) ? "done" : ""}"><input type="checkbox" data-pack="${sel.id}|${i.id}" ${done.has(i.id) ? "checked" : ""}><span>${esc(i.label)}</span></label>`)}
     <p class="muted" style="margin:0;font-size:12.5px">${c.length > 1 ? "Une liste par enfant." : "Coche au fur et à mesure que tu prépares ton sac."} Le bureau voit qui a terminé.</p>
-    ${canPlan() && !isBureau() ? `<form id="addbring" class="row" style="gap:6px"><input id="brTxt" class="search" placeholder="Ajouter une affaire pour tous" aria-label="Nouvelle affaire"><button class="btn small">Ajouter</button></form>` : ""}
+    ${canPlan() && !isBureau() ? addBring("Ajouter une affaire pour tous") : ""}
+  </div>${persoBlock(tr, sel)}`;
+}
+// Liste de voyage perso : en plus de la liste officielle, chaque athlète ajoute ses propres affaires.
+// Seuls l'athlète et ses parents la voient (ni le bureau, ni les coachs).
+function persoBlock(tr, a) {
+  const l = persoOf(tr.id, a.id), k = l.filter(p => p.done).length, mine = a.id === me.id;
+  // Reprendre la liste perso du dernier déplacement
+  const prev = !l.length && D.perso.filter(p => p.athlete_id === a.id && p.trip_id !== tr.id);
+  const prevTrip = prev && prev.length ? prev.map(p => ({ p, e: eventOf(tripList().find(x => x.id === p.trip_id) || {}) })).filter(x => x.e).sort((x, y) => y.e.date.localeCompare(x.e.date))[0] : null;
+  return `<div class="card stack"><div class="row" style="justify-content:space-between"><h2>${mine ? "Ma liste perso" : "Liste perso de " + esc(first(a.full_name))}</h2>${l.length ? `<span class="tag ${k === l.length ? "ok" : "warn"}">${k}/${l.length}</span>` : ""}</div>
+    <p class="muted" style="margin:0;font-size:12.5px">${I.lock} En plus de la liste du club, pour les affaires personnelles (chargeur, doudou, médicaments…). Seuls ${mine ? "toi et tes parents" : esc(first(a.full_name)) + " et ses parents"} la voient, pas le bureau.</p>
+    ${l.length ? `<div>${l.map(p => `<label class="check ${p.done ? "done" : ""}"><input type="checkbox" data-pchk="${p.id}" ${p.done ? "checked" : ""}><span>${esc(p.label)}</span><button type="button" class="x" data-pdel="${p.id}" aria-label="Retirer ${esc(p.label)}">×</button></label>`).join("")}</div>` : ""}
+    ${prevTrip ? `<button class="btn small ghost" style="align-self:flex-start" data-pcopy="${a.id}|${prevTrip.p.trip_id}">Reprendre la liste perso de « ${esc(prevTrip.e.title)} »</button>` : ""}
+    <form id="addperso" data-aid="${a.id}" class="row" style="gap:6px"><input id="pTxt" class="search" placeholder="Ex : Chargeur, doudou…" aria-label="Nouvelle affaire perso"><button class="btn small">Ajouter</button></form>
   </div>`;
 }
 
@@ -1893,6 +1922,23 @@ function bind() {
       render(0); if (packedOf(tid, aid).length === itemsOf(tid).length) toast("Sac prêt, rien n'est oublié 🎉");
     } catch (e) { b.checked = !b.checked; fail(e); }
   }, "onchange");
+  on("[data-itemzone]", async b => {
+    const id = b.dataset.itemzone, zone = b.value || null;
+    try { await q(sb.from("trip_items").update({ zone }).eq("id", id).select()); const it = D.items.find(i => i.id === id); if (it) it.zone = zone; render(0); }
+    catch (e) { fail(e); }
+  }, "onchange");
+  on("[data-pchk]", async b => {
+    const it = D.perso.find(p => p.id === b.dataset.pchk); if (!it) return;
+    try { await q(sb.from("trip_personal_items").update({ done: b.checked }).eq("id", it.id).select()); it.done = b.checked; render(0); }
+    catch (e) { b.checked = !b.checked; fail(e); }
+  }, "onchange");
+  on("[data-pdel]", async (b, ev) => { ev.preventDefault();
+    try { await q(sb.from("trip_personal_items").delete().eq("id", b.dataset.pdel).select()); D.perso = D.perso.filter(p => p.id !== b.dataset.pdel); render(0); } catch (e) { fail(e); } });
+  on("[data-pcopy]", async b => {
+    const [aid, from] = b.dataset.pcopy.split("|"), tid = S.view.id;
+    try { const rows = await q(sb.from("trip_personal_items").insert(persoOf(from, aid).map((p, position) => ({ trip_id: tid, athlete_id: aid, label: p.label, position }))).select());
+      D.perso.push(...rows); render(0); toast("Liste perso reprise, tout est à recocher"); } catch (e) { fail(e); }
+  });
   on("[data-delitem]", async b => { try { await q(sb.from("trip_items").delete().eq("id", b.dataset.delitem).select()); D.items = D.items.filter(i => i.id !== b.dataset.delitem); render(0); toast("Retiré de la liste"); } catch (e) { fail(e); } });
   on("[data-delleg]", async b => { try { await q(sb.from("trip_legs").delete().eq("id", b.dataset.delleg).select()); D.legs = D.legs.filter(i => i.id !== b.dataset.delleg); render(0); } catch (e) { fail(e); } });
   on("[data-delstep]", async b => { try { await q(sb.from("trip_steps").delete().eq("id", b.dataset.delstep).select()); D.steps = D.steps.filter(i => i.id !== b.dataset.delstep); render(0); } catch (e) { fail(e); } });
@@ -2023,8 +2069,14 @@ function bind() {
   form("addbring", async () => {
     const v = val("brTxt"); if (!v) return;
     const pos = itemsOf(S.view.id).length;
-    const [row] = await q(sb.from("trip_items").insert({ trip_id: S.view.id, label: v, position: pos }).select()); D.items.push(row);
+    const zone = val("brZone") || null; S.brZone = zone;
+    const [row] = await q(sb.from("trip_items").insert(Object.assign({ trip_id: S.view.id, label: v, position: pos }, zone ? { zone } : {})).select()); D.items.push(row);
     document.getElementById("brTxt").value = ""; render(0); toast("Ajouté à la liste de tous les athlètes");
+  });
+  form("addperso", async f => {
+    const v = val("pTxt"), aid = f.dataset.aid, tid = S.view.id; if (!v) return;
+    const [row] = await q(sb.from("trip_personal_items").insert({ trip_id: tid, athlete_id: aid, label: v, position: persoOf(tid, aid).length }).select()); D.perso.push(row);
+    document.getElementById("pTxt").value = ""; render(0);
   });
 
   const mr = document.getElementById("mRole");
